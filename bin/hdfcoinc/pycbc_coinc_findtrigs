@@ -332,6 +332,8 @@ if args.strict_coinc_time:
     trigs1.valid = veto.segments_to_start_end(trigs1.segs)
 
 if args.ranking_statistic == "likelihood_newsnr":
+    global dt_ring
+    global f_plus_cross
     dt_ring, f_plus_cross = generate_sky_rings()
  
 # initialize a Stat class instance to calculate the coinc ranking statistic
