@@ -4,7 +4,7 @@ from pycbc import events, detector
 from pycbc.events import veto, coinc, stat
 import pycbc.version
 import lal
-from pycbc.coherent import likelihood, fstat, sky
+from pycbc.coherent import amp_phase, sky
 from scipy.misc import logsumexp
        
 parser = argparse.ArgumentParser()
@@ -90,12 +90,13 @@ def generate_sky_rings(dt_points=180, ring_points=300):
         dt = pt.get_time_delay("H1", "L1", t_gps)
         ring = sky.ISOTimeDelayLine(["H1", "L1"], pt.longitude, pt.latitude, 
                                     t_gps, ring_points)
-        f_pc = numpy.zeros([len(ring),2,2])
-        for j, r in enumerate(ring):
-            f_pc[j] = numpy.array([numpy.array(lal.ComputeDetAMResponse(
-                detector.Detector(ifo).response,
-                r.longitude, r.latitude, 0., t_gmst))
-                for ifo in ["H1", "L1"]])
+        f_pc = {}
+        for ifo in ["H1", "L1"]:
+            f_pc[ifo] = zeros([len(ring)], dtype=complex)
+            for j, r in enumerate(ring):
+                fp, fc = lal.ComputeDetAMResponse(dets[ifo].response, r.longitude, 
+                    r.latitude, 0., t_gmst)
+                f_pc[ifo][j] = fp + 1j * fc
         f_plus_cross.append(f_pc)
     return dt_ring, f_plus_cross
 
@@ -176,33 +177,22 @@ class LikelihoodStatistic(NewSNRStatistic):
         """ Calculate the coincident statistic.
         """
         td = s1[:,1] - s2[:,1] - slide * step
-        z = numpy.array([s1[:,2] * numpy.exp(1j * s1[:,3]), 
-            s2[:,2] * numpy.exp(1j * s2[:,3])])
+        z1 = numpy.array([s1[:,2] * numpy.exp(1j * s1[:,3])])
+        z2 = numpy.array([s2[:,2] * numpy.exp(1j * s2[:,3])])
         sigma = numpy.array([s1[:,4], s2[:,4]])
-        dmax = numpy.linalg.norm(sigma)/8/numpy.sqrt(2)
+        dmax = numpy.linalg.norm(sigma)
         cstat = numpy.zeros_like(td)
         snr = numpy.linalg.norm(z, axis=0)
         newsnrsq = s1[:,0]**2 + s2[:,0]**2
         loud = numpy.sqrt(newsnrsq) > args.newsnr_threshold
         logging.info('Coincident Trigs above threshold: %s' % (sum(loud)))
-
         
         for c in loud.nonzero()[0]:
             i = (abs(dt_ring - td[c])).argmin()
-            f_pc = f_plus_cross[i]
-            lik = numpy.zeros(len(f_pc))
-            for j, f in enumerate(f_pc):
-                f_sig = f * sigma[:,c].reshape([2,1])
-                a = fstat.snr_f_to_a(z[:,c], f_sig)
-                fp, fc, chi = fstat.dominant_polarization(f_sig)
-                D, cosi, psi, phi = fstat.a_to_params(a)
-                a_dp = fstat.params_to_a(D, cosi, psi - chi, phi)
-                lik[j] = likelihood.like_approx(a_dp, fp, fc, dmax)[0]
-                if abs(fstat.expected_snr(a_dp, fp, fc) - snr[c]) > 1e-4:
-                    print("Error for event %d, sky point %d" % (c, j))
-                    print("Original SNR: %.4e; New SNR: %.4e" % 
-                        (snr[c], fstat.expected_snr(a_dp, fp, fc)))
-            cstat[c] = logsumexp(lik) - numpy.log(len(f_pc)) - snr[c]**2/2 + newsnrsq[c]/2
+            f_sig1 = f_plus_cross["H1"][i] * sigma[0,c]
+            f_sig2 = f_plus_cross["L1"][i] * sigma[1,c]
+            like = amp_phase.like_ring(z1, z2, fsig1, fsig2, dmax)
+            cstat[c] = 2 * like - snr[c]**2 + newsnrsq[c] + 5.5 * log(newsnrsq[c])
         return cstat 
         
 
