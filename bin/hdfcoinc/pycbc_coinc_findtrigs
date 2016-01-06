@@ -92,10 +92,11 @@ def generate_sky_rings(dt_points=180, ring_points=300):
                                     t_gps, ring_points)
         f_pc = {}
         for ifo in ["H1", "L1"]:
-            f_pc[ifo] = zeros([len(ring)], dtype=complex)
+            f_pc[ifo] = numpy.zeros([len(ring)], dtype=complex)
             for j, r in enumerate(ring):
-                fp, fc = lal.ComputeDetAMResponse(dets[ifo].response, r.longitude, 
-                    r.latitude, 0., t_gmst)
+                fp, fc = lal.ComputeDetAMResponse(
+                    detector.Detector(ifo).response,
+                    r.longitude, r.latitude, 0., t_gmst)
                 f_pc[ifo][j] = fp + 1j * fc
         f_plus_cross.append(f_pc)
     return dt_ring, f_plus_cross
@@ -180,19 +181,20 @@ class LikelihoodStatistic(NewSNRStatistic):
         z1 = numpy.array([s1[:,2] * numpy.exp(1j * s1[:,3])])
         z2 = numpy.array([s2[:,2] * numpy.exp(1j * s2[:,3])])
         sigma = numpy.array([s1[:,4], s2[:,4]])
-        dmax = numpy.linalg.norm(sigma)
+        dmax = numpy.linalg.norm(sigma, axis=0)
         cstat = numpy.zeros_like(td)
-        snr = numpy.linalg.norm(z, axis=0)
+        snrsq = s1[:,2]**2 + s2[:,2]**2
         newsnrsq = s1[:,0]**2 + s2[:,0]**2
         loud = numpy.sqrt(newsnrsq) > args.newsnr_threshold
         logging.info('Coincident Trigs above threshold: %s' % (sum(loud)))
         
         for c in loud.nonzero()[0]:
             i = (abs(dt_ring - td[c])).argmin()
-            f_sig1 = f_plus_cross["H1"][i] * sigma[0,c]
-            f_sig2 = f_plus_cross["L1"][i] * sigma[1,c]
-            like = amp_phase.like_ring(z1, z2, fsig1, fsig2, dmax)
-            cstat[c] = 2 * like - snr[c]**2 + newsnrsq[c] + 5.5 * log(newsnrsq[c])
+            f_sig1 = f_plus_cross[i]["H1"] * sigma[0,c]
+            f_sig2 = f_plus_cross[i]["L1"] * sigma[1,c]
+            like = amp_phase.like_ring(z1[c], z2[c], f_sig1, f_sig2, dmax[c])
+            cstat[c] = 2 * like - snrsq[c] + newsnrsq[c] + \
+                5.5 * numpy.log(newsnrsq[c])
         return cstat 
         
 
