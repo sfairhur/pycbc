@@ -178,8 +178,8 @@ class LikelihoodStatistic(NewSNRStatistic):
         """ Calculate the coincident statistic.
         """
         td = s1[:,1] - s2[:,1] - slide * step
-        z1 = numpy.array([s1[:,2] * numpy.exp(1j * s1[:,3])])
-        z2 = numpy.array([s2[:,2] * numpy.exp(1j * s2[:,3])])
+        z1 = numpy.array(s1[:,2] * numpy.exp(1j * s1[:,3]))
+        z2 = numpy.array(s2[:,2] * numpy.exp(1j * s2[:,3]))
         sigma = numpy.array([s1[:,4], s2[:,4]])
         dmax = numpy.linalg.norm(sigma, axis=0)
         cstat = numpy.zeros_like(td)
