@@ -182,7 +182,7 @@ class LikelihoodStatistic(NewSNRStatistic):
         z2 = numpy.array(s2[:,2] * numpy.exp(1j * s2[:,3]))
         sigma = numpy.array([s1[:,4], s2[:,4]])
         dmax = numpy.linalg.norm(sigma, axis=0)
-        cstat = numpy.zeros_like(td)
+        cstat = numpy.ones_like(td)
         snrsq = s1[:,2]**2 + s2[:,2]**2
         newsnrsq = s1[:,0]**2 + s2[:,0]**2
         loud = numpy.sqrt(newsnrsq) > args.newsnr_threshold
@@ -193,8 +193,8 @@ class LikelihoodStatistic(NewSNRStatistic):
             f_sig1 = f_plus_cross[i]["H1"] * sigma[0,c]
             f_sig2 = f_plus_cross[i]["L1"] * sigma[1,c]
             like = amp_phase.like_ring(z1[c], z2[c], f_sig1, f_sig2, dmax[c])
-            cstat[c] = 2 * like - snrsq[c] + newsnrsq[c] + \
-                5.5 * numpy.log(newsnrsq[c])
+            cstat[c] = numpy.sqrt(2 * like - snrsq[c] + newsnrsq[c] + \
+                5.5 * numpy.log(newsnrsq[c]))
         return cstat 
         
 
