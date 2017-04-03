@@ -1,7 +1,6 @@
 from numpy import *
 from scipy import special
 from scipy.integrate import quad
-import pylab
 import fstat
 
 
@@ -51,6 +50,7 @@ def like_equal_cosi(a_hat, f, x, d_max=1000., make_plot=False):
                   max(a_peak - 5 * a_width, 0), a_peak + 5 * a_width,
                   epsabs=1e-2, epsrel=1e-4)[0]
     if make_plot:
+        import pylab
         a = linspace(max(a_peak - 5 * a_width, 0), a_peak + 5 * a_width)
         lc = zeros_like(a)
         for (i, a) in enumerate(a):
