@@ -88,7 +88,7 @@ class Correlator(object):
     """
     def __new__(cls, *args, **kwargs):
         real_cls = _correlate_factory(*args, **kwargs)
-        return real_cls(*args, **kwargs)
+        return real_cls(*args, **kwargs) # pylint:disable=not-callable
 
 # The class below should serve as the parent for all schemed classes.
 # The intention is that this class serves simply as the location for
@@ -723,7 +723,7 @@ def compute_max_snr_over_sky_loc_stat(hplus, hcross, hphccorr,
         sqroot[indices] = 0
     sqroot = numpy.sqrt(sqroot)
     det_stat_sq = 0.5 * (hplus_magsq + hcross_magsq - \
-                         2 * rho_pluscross*hphccorr + sqroot)
+                         2 * rho_pluscross*hphccorr + sqroot) / denom
 
     det_stat = numpy.sqrt(det_stat_sq)
 
@@ -950,9 +950,6 @@ def get_cutoff_indices(flow, fhigh, df, N):
 
     return kmin,kmax
 
-# Workspace Memory for the matchedfilter
-_qtilde_t = None
-
 def matched_filter_core(template, data, psd=None, low_frequency_cutoff=None,
                   high_frequency_cutoff=None, h_norm=None, out=None, corr_out=None):
     """ Return the complex snr and normalization.
@@ -993,12 +990,6 @@ def matched_filter_core(template, data, psd=None, low_frequency_cutoff=None,
     norm : float
         The normalization of the complex snr.
     """
-    if corr_out is not None:
-        _qtilde = corr_out
-    else:
-        global _qtilde_t
-        _qtilde = _qtilde_t
-
     htilde = make_frequency_series(template)
     stilde = make_frequency_series(data)
 
@@ -1009,6 +1000,11 @@ def matched_filter_core(template, data, psd=None, low_frequency_cutoff=None,
     kmin, kmax = get_cutoff_indices(low_frequency_cutoff,
                                    high_frequency_cutoff, stilde.delta_f, N)
 
+    if corr_out is not None:
+        qtilde = corr_out
+    else:
+        qtilde = zeros(N, dtype=complex_same_precision_as(data))    
+    
     if out is None:
         _q = zeros(N, dtype=complex_same_precision_as(data))
     elif (len(out) == N) and type(out) is Array and out.kind =='complex':
@@ -1016,25 +1012,18 @@ def matched_filter_core(template, data, psd=None, low_frequency_cutoff=None,
     else:
         raise TypeError('Invalid Output Vector: wrong length or dtype')
 
-    if corr_out:
-        pass
-    elif (_qtilde is None) or (len(_qtilde) != N) or _qtilde.dtype != data.dtype:
-        _qtilde_t = _qtilde = zeros(N, dtype=complex_same_precision_as(data))
-    else:
-        _qtilde.clear()
-
-    correlate(htilde[kmin:kmax], stilde[kmin:kmax], _qtilde[kmin:kmax])
+    correlate(htilde[kmin:kmax], stilde[kmin:kmax], qtilde[kmin:kmax])
 
     if psd is not None:
         if isinstance(psd, FrequencySeries):
             if psd.delta_f == stilde.delta_f :
-                _qtilde[kmin:kmax] /= psd[kmin:kmax]
+                qtilde[kmin:kmax] /= psd[kmin:kmax]
             else:
                 raise TypeError("PSD delta_f does not match data")
         else:
             raise TypeError("PSD must be a FrequencySeries")
 
-    ifft(_qtilde, _q)
+    ifft(qtilde, _q)
 
     if h_norm is None:
         h_norm = sigmasq(htilde, psd, low_frequency_cutoff, high_frequency_cutoff)
@@ -1043,7 +1032,7 @@ def matched_filter_core(template, data, psd=None, low_frequency_cutoff=None,
     delta_t = 1.0 / (N * stilde.delta_f)
 
     return (TimeSeries(_q, epoch=stilde._epoch, delta_t=delta_t, copy=False),
-           FrequencySeries(_qtilde, epoch=stilde._epoch, delta_f=htilde.delta_f, copy=False),
+           FrequencySeries(qtilde, epoch=stilde._epoch, delta_f=htilde.delta_f, copy=False),
            norm)
 
 def smear(idx, factor):
@@ -1103,7 +1092,7 @@ def matched_filter(template, data, psd=None, low_frequency_cutoff=None,
     snr : TimeSeries
         A time series containing the complex snr.
     """
-    snr, corr, norm = matched_filter_core(template, data, psd=psd,
+    snr, _, norm = matched_filter_core(template, data, psd=psd,
             low_frequency_cutoff=low_frequency_cutoff,
             high_frequency_cutoff=high_frequency_cutoff, h_norm=sigmasq)
     return snr * norm
@@ -1147,7 +1136,7 @@ def match(vec1, vec2, psd=None, low_frequency_cutoff=None,
     global _snr
     if _snr is None or _snr.dtype != htilde.dtype or len(_snr) != N:
         _snr = zeros(N,dtype=complex_same_precision_as(vec1))
-    snr, corr, snr_norm = matched_filter_core(htilde,stilde,psd,low_frequency_cutoff,
+    snr, _, snr_norm = matched_filter_core(htilde,stilde,psd,low_frequency_cutoff,
                              high_frequency_cutoff, v1_norm, out=_snr)
     maxsnr, max_id = snr.abs_max_loc()
     if v2_norm is None:
@@ -1509,10 +1498,15 @@ class LiveBatchMatchedFilter(object):
         return result, veto_info
 
 def compute_followup_snr_series(data_reader, htilde, trig_time,
-                                duration=0.095):
+                                duration=0.095, check_state=True):
     """Given a StrainBuffer, a template frequency series and a trigger time,
     compute a portion of the SNR time series centered on the trigger for its
-    sky localization and followup.
+    rapid sky localization and followup.
+
+    If the trigger time is too close to the boundary of the valid data segment
+    the SNR series is calculated anyway and might be slightly contaminated by
+    filter and wrap-around effects. For reasonable durations this will only
+    affect a small fraction of the triggers and probably in a negligible way.
 
     Parameters
     ----------
@@ -1529,17 +1523,41 @@ def compute_followup_snr_series(data_reader, htilde, trig_time,
         Duration of the computed SNR series in seconds. If omitted, it defaults
         to twice the Earth light travel time plus 10 ms of timing uncertainty.
 
+    check_state : boolean
+        If True, and the detector was offline or flagged for bad data quality
+        at any point during the inspiral, then return (None, None) instead.
+
     Returns
     -------
     snr : TimeSeries
-        The portion of SNR around the trigger.
+        The portion of SNR around the trigger. None if the detector is offline
+        or has bad data quality, and check_state is True.
 
     psd : FrequencySeries
-        The noise PSD corresponding to the trigger time.
+        The noise PSD corresponding to the trigger time. None if the detector
+        is offline or has bad data quality, and check_state is True.
     """
+    if check_state:
+        # was the detector observing for the full amount of involved data?
+        state_start_time = trig_time - duration / 2 - htilde.length_in_time
+        state_end_time = trig_time + duration / 2
+        state_duration = state_end_time - state_start_time
+        if data_reader.state is not None \
+                and not data_reader.state.is_extent_valid(
+                        state_start_time, state_duration):
+            return None, None
+
+        # was the data quality ok for the full amount of involved data?
+        dq_start_time = state_start_time - data_reader.dq_padding
+        dq_duration = state_duration + 2 * data_reader.dq_padding
+        if data_reader.dq is not None \
+                and not data_reader.dq.is_extent_valid(
+                        dq_start_time, dq_duration):
+            return None, None
+
     stilde = data_reader.overwhitened_data(htilde.delta_f)
 
-    norm = 4.0 * htilde.delta_f / (htilde.sigmasq(stilde.psd) ** 0.5)
+    norm = 4.0 * htilde.delta_f * htilde.sigmasq(stilde.psd) ** (-0.5)
 
     qtilde = zeros((len(htilde) - 1) * 2, dtype=htilde.dtype)
     correlate(htilde, stilde, qtilde)
@@ -1548,26 +1566,22 @@ def compute_followup_snr_series(data_reader, htilde, trig_time,
 
     valid_end = int(len(qtilde) - data_reader.trim_padding)
     valid_start = int(valid_end - data_reader.blocksize * data_reader.sample_rate)
+
+    half_dur_samples = int(data_reader.sample_rate * duration / 2)
+    valid_start -= half_dur_samples
+    valid_end += half_dur_samples
+    if valid_start < 0 or valid_end > len(snr)-1:
+        raise ValueError('Requested SNR duration ({0} s) too long'.format(duration))
+
     snr = snr[slice(valid_start, valid_end)]
-    snr *= norm
-    snr = TimeSeries(snr, delta_t=1./data_reader.sample_rate,
-                     epoch=data_reader.start_time)
+    snr_dt = 1. / data_reader.sample_rate
+    snr_epoch = data_reader.start_time - half_dur_samples * snr_dt
+    snr = TimeSeries(snr, delta_t=snr_dt, epoch=snr_epoch)
 
     onsource_idx = int(round(float(trig_time - snr.start_time) * snr.sample_rate))
-
-    onsource_start = onsource_idx - int(snr.sample_rate * duration / 2)
-    # FIXME avoid clipping with better handling of past data
-    if onsource_start < 0:
-        logging.warn('Clipping start of followup SNR time series')
-        onsource_start = 0
-
-    onsource_end = onsource_idx + int(snr.sample_rate * duration / 2)
-    if onsource_end > len(snr):
-        logging.warn('Clipping end of followup SNR time series')
-        onsource_end = len(snr) - 1
-
-    onsource_slice = slice(onsource_start, onsource_end + 1)
-    return snr[onsource_slice], stilde.psd
+    onsource_slice = slice(onsource_idx - half_dur_samples,
+                           onsource_idx + half_dur_samples + 1)
+    return snr[onsource_slice] * norm, stilde.psd
 
 __all__ = ['match', 'matched_filter', 'sigmasq', 'sigma', 'get_cutoff_indices',
            'sigmasq_series', 'make_frequency_series', 'overlap', 'overlap_cplx',

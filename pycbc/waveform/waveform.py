@@ -35,7 +35,7 @@ from pycbc.fft import fft
 from pycbc import pnutils
 from pycbc.waveform import utils as wfutils
 from pycbc.waveform import parameters
-from pycbc.filter import interpolate_complex_frequency
+from pycbc.filter import interpolate_complex_frequency, resample_to_delta_t
 import pycbc
 from spa_tmplt import spa_tmplt, spa_tmplt_norm, spa_tmplt_end, \
                       spa_tmplt_precondition, spa_amplitude_factor, \
@@ -46,6 +46,12 @@ class NoWaveformError(Exception):
     zeros being returned, e.g., if a requested `f_final` is <= `f_lower`.
     """
     pass
+
+# If this is set to True, waveform generation codes will try to regenerate
+# waveforms with known failure conditions to try to avoid the failure. For
+# example SEOBNRv3 waveforms would be regenerated with double the sample rate.
+# If this is set to False waveform failures will always raise exceptions
+fail_tolerant_waveform_generation = True
 
 default_args = (parameters.fd_waveform_params.default_dict() + \
     parameters.td_waveform_params).default_dict()
@@ -61,7 +67,6 @@ _lalsim_td_approximants = {}
 _lalsim_fd_approximants = {}
 _lalsim_enum = {}
 _lalsim_sgburst_approximants = {}
-
 
 def _check_lal_pars(p):
     """ Create a laldict object from the dictionary of waveform parameters
@@ -108,10 +113,12 @@ def _check_lal_pars(p):
     return lal_pars
 
 def _lalsim_td_waveform(**p):
+    fail_tolerant_waveform_generation
     lal_pars = _check_lal_pars(p)
     #nonGRparams can be straightforwardly added if needed, however they have to
     # be invoked one by one
-    hp1, hc1 = lalsimulation.SimInspiralChooseTDWaveform(
+    try:
+        hp1, hc1 = lalsimulation.SimInspiralChooseTDWaveform(
                float(pnutils.solar_mass_to_kg(p['mass1'])),
                float(pnutils.solar_mass_to_kg(p['mass2'])),
                float(p['spin1x']), float(p['spin1y']), float(p['spin1z']),
@@ -122,6 +129,26 @@ def _lalsim_td_waveform(**p):
                float(p['delta_t']), float(p['f_lower']), float(p['f_ref']),
                lal_pars,
                _lalsim_enum[p['approximant']])
+    except RuntimeError:
+        if not fail_tolerant_waveform_generation:
+            raise
+        # For some cases failure modes can occur. Here we add waveform-specific
+        # instructions to try to work with waveforms that are known to fail.
+        if p['approximant'] == 'SEOBNRv3':
+            # In this case we'll try doubling the sample time and trying again
+            # Don't want to get stuck in a loop though!
+            if 'delta_t_orig' not in p:
+                p['delta_t_orig'] = p['delta_t']
+            p['delta_t'] = p['delta_t'] / 2.
+            if p['delta_t_orig'] / p['delta_t'] > 9:
+                raise
+            hp, hc = _lalsim_td_waveform(**p)
+            p['delta_t'] = p['delta_t_orig']
+            hp = resample_to_delta_t(hp, hp.delta_t*2)
+            hc = resample_to_delta_t(hc, hc.delta_t*2)
+            return hp, hc
+        raise
+
     #lal.DestroyDict(lal_pars)
 
     hp = TimeSeries(hp1.data.data[:], delta_t=hp1.deltaT, epoch=hp1.epoch)
@@ -227,23 +254,23 @@ cuda_fd = dict(_lalsim_fd_approximants.items() + _cuda_fd_approximants.items())
 def print_td_approximants():
     print("LalSimulation Approximants")
     for approx in _lalsim_td_approximants.keys():
-        print "  " + approx
+        print("  " + approx)
     print("CUDA Approximants")
     for approx in _cuda_td_approximants.keys():
-        print "  " + approx
+        print("  " + approx)
 
 def print_fd_approximants():
     print("LalSimulation Approximants")
     for approx in _lalsim_fd_approximants.keys():
-        print "  " + approx
+        print("  " + approx)
     print("CUDA Approximants")
     for approx in _cuda_fd_approximants.keys():
-        print "  " + approx
+        print("  " + approx)
 
 def print_sgburst_approximants():
     print("LalSimulation Approximants")
     for approx in _lalsim_sgburst_approximants.keys():
-        print "  " + approx
+        print("  " + approx)
 
 def td_approximants(scheme=_scheme.mgr.state):
     """Return a list containing the available time domain approximants for
@@ -285,6 +312,8 @@ def get_obj_attrs(obj):
             for slot in obj.__slots__:
                 if hasattr(obj, slot):
                     pr[slot] = getattr(obj, slot)
+        elif isinstance(obj, dict):
+            pr = obj.copy()
         else:
             for name in dir(obj):
                 try:
@@ -636,6 +665,7 @@ _filter_time_lengths["SEOBNRv1_ROM_EffectiveSpin"] = seobnrv2_length_in_time
 _filter_time_lengths["SEOBNRv1_ROM_DoubleSpin"] = seobnrv2_length_in_time
 _filter_time_lengths["SEOBNRv2_ROM_EffectiveSpin"] = seobnrv2_length_in_time
 _filter_time_lengths["SEOBNRv2_ROM_DoubleSpin"] = seobnrv2_length_in_time
+_filter_time_lengths["EOBNRv2HM_ROM"] = seobnrv2_length_in_time
 _filter_time_lengths["SEOBNRv2_ROM_DoubleSpin_HI"] = seobnrv2_length_in_time
 _filter_time_lengths["SEOBNRv4_ROM"] = seobnrv4_length_in_time
 _filter_time_lengths["IMRPhenomC"] = imrphenomd_length_in_time
@@ -680,7 +710,7 @@ def get_waveform_filter(out, template=None, **kwargs):
         wav_gen = fd_wav[type(_scheme.mgr.state)]
 
         duration = get_waveform_filter_length_in_time(**input_params)
-        hp, hc = wav_gen[input_params['approximant']](duration=duration,
+        hp, _ = wav_gen[input_params['approximant']](duration=duration,
                                                return_hc=False, **input_params)
 
         hp.resize(n)
@@ -691,11 +721,8 @@ def get_waveform_filter(out, template=None, **kwargs):
         return hp
 
     elif input_params['approximant'] in td_approximants(_scheme.mgr.state):
-        # N: number of time samples required
-        N = (n-1)*2
-        delta_f = 1.0 / (N * input_params['delta_t'])
         wav_gen = td_wav[type(_scheme.mgr.state)]
-        hp, hc = wav_gen[input_params['approximant']](**input_params)
+        hp, _ = wav_gen[input_params['approximant']](**input_params)
         # taper the time series hp if required
         if ('taper' in input_params.keys() and \
             input_params['taper'] is not None):

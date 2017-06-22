@@ -67,8 +67,7 @@ def check_output_error_and_retcode(*popenargs, **kwargs):
     return output, error, retcode
 
 def check_output(*popenargs, **kwargs):
-    output, unused_error, unused_retcode = \
-                           check_output_error_and_retcode(*popenargs, **kwargs)
+    output, _, _ = check_output_error_and_retcode(*popenargs, **kwargs)
     return output
 
 ###############################################################################
@@ -688,7 +687,34 @@ class Workflow(pegasus_workflow.Workflow):
             except ValueError:
                 # There was no storage path
                 pass
-    
+
+    def save_config(self, fname, output_dir, cp=None):
+        """ Writes configuration file to disk and returns a pycbc.workflow.File
+        instance for the configuration file.
+
+        Parameters
+        -----------
+        fname : string
+            The filename of the configuration file written to disk.
+        output_dir : string
+            The directory where the file is written to disk.
+        cp : ConfigParser object
+            The ConfigParser object to write. If None then uses self.cp.
+
+        Returns
+        -------
+        FileList
+            The FileList object with the configuration file.
+        """
+        cp = self.cp if cp is None else cp
+        ini_file_path = os.path.join(output_dir, fname)
+        with open(ini_file_path, "wb") as fp:
+            cp.write(fp)
+        ini_file = FileList([File(self.ifos, "",
+                                  self.analysis_time,
+                                  file_url="file://" + ini_file_path)])
+        return ini_file
+
 class Node(pegasus_workflow.Node):
     def __init__(self, executable):
         super(Node, self).__init__(executable)
@@ -1358,10 +1384,8 @@ class FileList(list):
         
         # Sort the files
 
-        for ix, currFile in enumerate(self):
+        for currFile in self:
             segExtent = currFile.segment_list.extent()
-            segExtStart = float(segExtent[0])
-            segExtEnd = float(segExtent[1])
             startIdx = (segExtent[0] - startTime) / step
             endIdx = (segExtent[1] - startTime) / step
             # Add some small rounding here
@@ -1566,7 +1590,7 @@ class SegFile(File):
             ifo_list.sort()
         if valid_segment is None:
             if seg_summ_dict and \
-                    numpy.any([len(v) for k, v in seg_summ_dict.items()]):
+                    numpy.any([len(v) for _, v in seg_summ_dict.items()]):
                 # Only come here if seg_summ_dict is supplied and it is
                 # not empty.
                 valid_segment = seg_summ_dict.extent_all()
@@ -1607,9 +1631,9 @@ class SegFile(File):
         """
         # load xmldocument and SegmentDefTable and SegmentTables
         fp = open(xml_file, 'r')
-        xmldoc, digest = ligolw_utils.load_fileobj(fp,
-                                            gz=xml_file.endswith(".gz"),
-                                            contenthandler=ContentHandler)
+        xmldoc, _ = ligolw_utils.load_fileobj(fp,
+                                              gz=xml_file.endswith(".gz"),
+                                              contenthandler=ContentHandler)
 
         seg_def_table = table.get_table(xmldoc,
                                         lsctables.SegmentDefTable.tableName)

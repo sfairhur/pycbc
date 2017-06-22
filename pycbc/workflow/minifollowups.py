@@ -167,6 +167,8 @@ def setup_single_det_minifollowups(workflow, single_trig_file, tmpltbank_file,
     exe = Executable(workflow.cp, 'singles_minifollowup',
                      ifos=curr_ifo, out_dir=dax_output, tags=tags)
 
+    wikifile = curr_ifo + '_'.join(tags) + 'loudest_table.txt'
+
     node = exe.create_node()
     node.add_input_opt('--config-files', config_file)
     node.add_input_opt('--bank-file', tmpltbank_file)
@@ -175,6 +177,7 @@ def setup_single_det_minifollowups(workflow, single_trig_file, tmpltbank_file,
     node.add_opt('--inspiral-data-read-name', insp_data_name)
     node.add_opt('--inspiral-data-analyzed-name', insp_anal_name)
     node.add_opt('--instrument', curr_ifo)
+    node.add_opt('--wiki-file', wikifile)
     if veto_file is not None:
         assert(veto_segment_name is not None)
         node.add_input_opt('--veto-file', veto_file)
@@ -370,6 +373,8 @@ def make_single_template_plots(workflow, segs, data_read_name, analyzed_name,
                 node.add_opt('--mass2', "%.6f" % params['mass2'])
                 node.add_opt('--spin1z',"%.6f" % params['spin1z'])
                 node.add_opt('--spin2z',"%.6f" % params['spin2z'])
+                node.add_opt('--template-start-frequency',
+                             "%.6f" % params['f_lower'])
                 # Is this precessing?
                 if params.has_key('u_vals') or \
                                              params.has_key('u_vals_%s' % ifo):
@@ -558,7 +563,7 @@ def make_singles_timefreq(workflow, single, bank_file, trig_time, out_dir,
         The time of the trigger being followed up.
     out_dir: str
         Location of directory to output to
-    veto_file: File (optional, default=None)
+    veto_file: pycbc.workflow.core.File (optional, default=None)
         If given use this file to veto triggers to determine the loudest event.
         FIXME: Veto files *should* be provided a definer argument and not just
         assume that all segments should be read.
