@@ -245,11 +245,9 @@ def datafind_connection(server=None):
         cert_file, key_file = None, None
 
     # Is a port specified in the server URL
-    server, port = datafind_server.split(':',1)
-    if port == "":
-        port = None
-    else:
-        port = int(port)
+    dfs_fields = datafind_server.split(':', 1)
+    server = dfs_fields[0]
+    port = int(dfs_fields[1]) if len(dfs_fields) == 2 else None
 
     # Open connection to the datafind server
     if cert_file and key_file:
@@ -613,12 +611,10 @@ class DataBuffer(object):
             if lal.GPSTimeNow() > timeout + self.raw_buffer.end_time:
                 # The frame is not there and it should be by now, so we give up
                 # and treat it as zeros
-                logging.info('{0} frame missing, giving up'.format(self.detector))
                 DataBuffer.null_advance(self, blocksize)
                 return None
             else:
                 # I am too early to give up on this frame, so we should try again
-                logging.info('{0} frame missing, waiting a bit more'.format(self.detector))
                 time.sleep(1)
                 return self.attempt_advance(blocksize, timeout=timeout)
 
@@ -751,10 +747,9 @@ class StatusBuffer(DataBuffer):
             Returns True if all of the status information if valid,
             False if any is not.
         """
-        if self.increment_update_cache:
-            self.update_cache_by_increment(blocksize)
-
         try:
+            if self.increment_update_cache:
+                self.update_cache_by_increment(blocksize)
             ts = DataBuffer.advance(self, blocksize)
             return self.check_valid(ts)
         except RuntimeError:

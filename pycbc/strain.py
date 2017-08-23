@@ -17,7 +17,7 @@
 This modules contains functions reading, generating, and segmenting strain data
 """
 import copy
-import logging, numpy, lal
+import logging, numpy
 import pycbc.noise
 import pycbc.types
 from pycbc.types import TimeSeries, zeros
@@ -194,9 +194,11 @@ def from_cli(opt, dyn_range_fac=1, precision='single',
         required attributes  (gps-start-time, gps-end-time, strain-high-pass, 
         pad-data, sample-rate, (frame-cache or frame-files), channel-name, 
         fake-strain, fake-strain-seed, fake-strain-from-file, gating_file).
-    dyn_range_fac: {float, 1}, optional
+    dyn_range_fac : {float, 1}, optional
         A large constant to reduce the dynamic range of the strain.
-    inj_filter_rejector: InjFilterRejector instance; optional, default=None
+    precision : string
+        Precision of the returned strain ('single' or 'double').
+    inj_filter_rejector : InjFilterRejector instance; optional, default=None
         If given send the InjFilterRejector instance to the inject module so
         that it can store a reduced representation of injections if
         necessary.
@@ -269,7 +271,7 @@ def from_cli(opt, dyn_range_fac=1, precision='single',
             logging.info("Converting to float64")
             strain = (strain * dyn_range_fac).astype(pycbc.types.float64)
         else:
-            raise ValueError("unrecognized precision {}".format(precision))
+            raise ValueError("Unrecognized precision {}".format(precision))
 
         if opt.gating_file is not None:
             logging.info("Gating glitches")
@@ -304,6 +306,32 @@ def from_cli(opt, dyn_range_fac=1, precision='single',
         logging.info("Highpass Filtering")
         strain = highpass(strain, frequency=opt.strain_high_pass)
 
+        if hasattr(opt, 'witness_frame_type') and opt.witness_frame_type:
+            stilde = strain.to_frequencyseries()
+            import h5py
+            tf_file = h5py.File(opt.witness_tf_file)
+            for key in tf_file:
+                witness = pycbc.frame.query_and_read_frame(opt.witness_frame_type, str(key),
+                       start_time=strain.start_time, end_time=strain.end_time)
+                witness = (witness * dyn_range_fac).astype(strain.dtype)
+                tf = pycbc.types.load_frequencyseries(opt.witness_tf_file, group=key)
+                tf = tf.astype(stilde.dtype)
+                
+                flen = int(opt.witness_filter_length * strain.sample_rate)
+                tf = pycbc.psd.interpolate(tf, stilde.delta_f)
+
+                tf_time = tf.to_timeseries()
+                window = Array(numpy.hanning(flen*2), dtype=strain.dtype)
+                tf_time[0:flen] *= window[flen:]
+                tf_time[len(tf_time)-flen:] *= window[0:flen]
+                tf = tf_time.to_frequencyseries()
+                
+                kmax = min(len(tf), len(stilde)-1)
+                stilde[:kmax] -= tf[:kmax] * witness.to_frequencyseries()[:kmax]
+                
+            strain = stilde.to_timeseries()
+                
+
         logging.info("Remove Padding")
         start = opt.pad_data*opt.sample_rate
         end = len(strain)-opt.sample_rate*opt.pad_data
@@ -328,13 +356,17 @@ def from_cli(opt, dyn_range_fac=1, precision='single',
         if opt.fake_strain == 'zeroNoise':
             logging.info("Making zero-noise time series")
             strain = TimeSeries(pycbc.types.zeros(tlen),
-                                delta_t=1.0/opt.sample_rate)
+                                delta_t=1.0/opt.sample_rate,
+                                epoch=opt.gps_start_time)
         else:
             logging.info("Making colored noise")
-            strain = pycbc.noise.noise_from_psd(tlen, 1.0/opt.sample_rate,
-                                                strain_psd,
-                                                seed=opt.fake_strain_seed)
-        strain._epoch = lal.LIGOTimeGPS(opt.gps_start_time)
+            from pycbc.noise.reproduceable import colored_noise
+            strain = colored_noise(strain_psd, opt.gps_start_time,
+                                          opt.gps_end_time,
+                                          seed=opt.fake_strain_seed, 
+                                          low_frequency_cutoff=opt.strain_high_pass)
+            strain = resample_to_delta_t(strain, 1.0/opt.sample_rate)
+
 
         if opt.injection_file:
             logging.info("Applying injections")
@@ -358,6 +390,11 @@ def from_cli(opt, dyn_range_fac=1, precision='single',
         if precision == 'single':
             logging.info("Converting to float32")
             strain = (dyn_range_fac * strain).astype(pycbc.types.float32)
+        elif precision == 'double':
+            logging.info("Converting to float64")
+            strain = (dyn_range_fac * strain).astype(pycbc.types.float64)
+        else:
+            raise ValueError("Unrecognized precision {}".format(precision))
 
     if opt.taper_data:
         logging.info("Tapering data")
@@ -519,6 +556,17 @@ def insert_strain_option_group(parser, gps_times=True):
     data_reading_group.add_argument("--zpk-k", type=float,
                     help="(optional) Zero-pole-gain (zpk) filter strain. "
                         "Transfer function gain")
+                        
+    # Options to apply to subtract noise from a witness channel and known
+    # transfer function.
+    data_reading_group.add_argument("--witness-frame-type", type=str,
+                    help="(optional), frame type which will be use to query the"
+                         "witness channel data.")
+    data_reading_group.add_argument("--witness-tf-file", type=str,
+                    help="an hdf file containing the transfer"
+                         "  functions and the associated channel names")
+    data_reading_group.add_argument("--witness-filter-length", type=float,
+                    help="filter length in seconds for the transfer function")
 
     return data_reading_group
 
@@ -1461,7 +1509,7 @@ class StrainBuffer(pycbc.frame.DataBuffer):
 
         # We have given up so there is no time series
         if ts is None:
-            logging.info("Giving on up %s frame...", self.detector)
+            logging.info("%s frame is late, giving up", self.detector)
             self.null_advance_strain(blocksize)
             if self.state:
                 self.state.null_advance(blocksize)
