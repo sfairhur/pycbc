@@ -128,15 +128,25 @@ def make_throughput_plot(workflow, insp_files, out_dir, tags=None):
     workflow += node
 
 def make_foreground_table(workflow, trig_file, bank_file, ftag, out_dir,
-                          singles=None, extension='.html', tags=None):
-    if tags is None:
+                          singles=None, extension='.html', tags=None,
+                          hierarchical_level=None):
+
+    if hierarchical_level is not None and tags:
+        tags = [("HIERARCHICAL_LEVEL_{:02d}".format(
+                hierarchical_level))] + tags
+    elif hierarchical_level is not None and not tags:
+        tags = ["HIERARCHICAL_LEVEL_{:02d}".format(hierarchical_level)]
+    elif hierarchical_level is None and not tags:
         tags = []
+
     makedir(out_dir)
     node = PlotExecutable(workflow.cp, 'page_foreground', ifos=workflow.ifos,
                     out_dir=out_dir, tags=tags).create_node()
     node.add_input_opt('--bank-file', bank_file)
     node.add_opt('--foreground-tag', ftag)
     node.add_input_opt('--trigger-file', trig_file)
+    if hierarchical_level is not None:
+        node.add_opt('--use-hierarchical-level', hierarchical_level)
     if singles is not None:
         node.add_input_list_opt('--single-detector-triggers', singles)
     node.new_output_file_opt(bank_file.segment, extension, '--output-file')
@@ -210,7 +220,7 @@ def make_seg_table(workflow, seg_files, seg_names, out_dir, tags=None,
     node.add_input_list_opt('--segment-files', seg_files)
     quoted_seg_names = []
     for s in seg_names:
-      quoted_seg_names.append("'" + s + "'")
+        quoted_seg_names.append("'" + s + "'")
     node.add_opt('--segment-names', ' '.join(quoted_seg_names))
     if description:
         node.add_opt('--description', "'" + description + "'")
@@ -256,22 +266,32 @@ def make_seg_plot(workflow, seg_files, out_dir, seg_names=None, tags=None):
     node.add_input_list_opt('--segment-files', seg_files)
     quoted_seg_names = []
     for s in seg_names:
-      quoted_seg_names.append("'" + s + "'")
+        quoted_seg_names.append("'" + s + "'")
     node.add_opt('--segment-names', ' '.join(quoted_seg_names))
     node.new_output_file_opt(workflow.analysis_time, '.html', '--output-file')
     workflow += node
     return node.output_files[0]
 
-def make_ifar_plot(workflow, trigger_file, out_dir, tags=None):
+def make_ifar_plot(workflow, trigger_file, out_dir, tags=None,
+                   hierarchical_level=None):
     """ Creates a node in the workflow for plotting cumulative histogram
     of IFAR values.
     """
 
-    if tags is None: tags = []
+    if hierarchical_level is not None and tags:
+        tags = [("HIERARCHICAL_LEVEL_{:02d}".format(
+                hierarchical_level))] + tags
+    elif hierarchical_level is not None and not tags:
+        tags = ["HIERARCHICAL_LEVEL_{:02d}".format(hierarchical_level)]
+    elif hierarchical_level is None and not tags:
+        tags = []
+
     makedir(out_dir)
     node = PlotExecutable(workflow.cp, 'page_ifar', ifos=workflow.ifos,
                     out_dir=out_dir, tags=tags).create_node()
     node.add_input_opt('--trigger-file', trigger_file)
+    if hierarchical_level is not None:
+        node.add_opt('--use-hierarchical-level', hierarchical_level)
     node.new_output_file_opt(workflow.analysis_time, '.png', '--output-file')
     workflow += node
     return node.output_files[0]
@@ -291,9 +311,10 @@ def make_snrchi_plot(workflow, trig_files, veto_file, veto_name,
                         tags=[tag] + tags).create_node()
 
             node.set_memory(15000)
-            node.add_opt('--segment-name', veto_name)
             node.add_input_opt('--trigger-file', trig_file)
-            node.add_input_opt('--veto-file', veto_file)
+            if veto_file is not None:
+                node.add_input_opt('--veto-file', veto_file)
+                node.add_opt('--segment-name', veto_name)
             node.new_output_file_opt(trig_file.segment, '.png', '--output-file')
             workflow += node
             files += node.output_files
@@ -317,12 +338,22 @@ def make_foundmissed_plot(workflow, inj_file, out_dir, exclude=None,
     return files
 
 def make_snrratehist_plot(workflow, bg_file, out_dir, closed_box=False,
-                         tags=None):
-    tags = [] if tags is None else tags
+                         tags=None, hierarchical_level=None):
+
+    if hierarchical_level is not None and tags:
+        tags = [("HIERARCHICAL_LEVEL_{:02d}".format(
+                hierarchical_level))] + tags
+    elif hierarchical_level is not None and not tags:
+        tags = ["HIERARCHICAL_LEVEL_{:02d}".format(hierarchical_level)]
+    elif hierarchical_level is None and not tags:
+        tags = []
+
     makedir(out_dir)
     node = PlotExecutable(workflow.cp, 'plot_snrratehist', ifos=workflow.ifos,
                 out_dir=out_dir, tags=tags).create_node()
     node.add_input_opt('--trigger-file', bg_file)
+    if hierarchical_level is not None:
+        node.add_opt('--use-hierarchical-level', hierarchical_level)
 
     if closed_box:
         node.add_opt('--closed-box')
@@ -332,12 +363,22 @@ def make_snrratehist_plot(workflow, bg_file, out_dir, closed_box=False,
     return node.output_files[0]
 
 def make_snrifar_plot(workflow, bg_file, out_dir, closed_box=False,
-                     cumulative=True, tags=None):
-    tags = [] if tags is None else tags
+                     cumulative=True, tags=None, hierarchical_level=None):
+
+    if hierarchical_level is not None and tags:
+        tags = [("HIERARCHICAL_LEVEL_{:02d}".format(
+                hierarchical_level))] + tags
+    elif hierarchical_level is not None and not tags:
+        tags = ["HIERARCHICAL_LEVEL_{:02d}".format(hierarchical_level)]
+    elif hierarchical_level is None and not tags:
+        tags = []
+
     makedir(out_dir)
     node = PlotExecutable(workflow.cp, 'plot_snrifar', ifos=workflow.ifos,
                 out_dir=out_dir, tags=tags).create_node()
     node.add_input_opt('--trigger-file', bg_file)
+    if hierarchical_level is not None:
+        node.add_opt('--use-hierarchical-level', hierarchical_level)
 
     if closed_box:
         node.add_opt('--closed-box')
@@ -379,8 +420,9 @@ def make_single_hist(workflow, trig_file, veto_file, veto_name,
                     ifos=trig_file.ifo,
                     out_dir=out_dir,
                     tags=[tag] + tags).create_node()
-        node.add_opt('--segment-name', veto_name)
-        node.add_input_opt('--veto-file', veto_file)
+        if veto_file is not None:
+            node.add_opt('--segment-name', veto_name)
+            node.add_input_opt('--veto-file', veto_file)
         node.add_input_opt('--trigger-file', trig_file)
         if bank_file:
             node.add_input_opt('--bank-file', bank_file)
@@ -403,8 +445,9 @@ def make_binned_hist(workflow, trig_file, veto_file, veto_name,
                     out_dir=out_dir,
                     tags=[tag] + tags).create_node()
         node.add_opt('--ifo', trig_file.ifo)
-        node.add_opt('--veto-segment-name', veto_name)
-        node.add_input_opt('--veto-file', veto_file)
+        if veto_file is not None:
+            node.add_opt('--veto-segment-name', veto_name)
+            node.add_input_opt('--veto-file', veto_file)
         node.add_input_opt('--trigger-file', trig_file)
         node.add_input_opt('--bank-file', bank_file)
         node.new_output_file_opt(trig_file.segment, '.png', '--output-file')
@@ -427,9 +470,10 @@ def make_singles_plot(workflow, trig_files, bank_file, veto_file, veto_name,
                         tags=[tag] + tags).create_node()
 
             node.set_memory(15000)
-            node.add_opt('--segment-name', veto_name)
             node.add_input_opt('--bank-file', bank_file)
-            node.add_input_opt('--veto-file', veto_file)
+            if veto_file is not None:
+                node.add_input_opt('--veto-file', veto_file)
+                node.add_opt('--segment-name', veto_name)
             node.add_opt('--detector', trig_file.ifo)
             node.add_input_opt('--single-trig-file', trig_file)
             node.new_output_file_opt(trig_file.segment, '.png', '--output-file')

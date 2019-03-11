@@ -62,6 +62,7 @@ parser.add_argument('--ifar-threshold', type=float, default=None,
                          "than this threshold.")
 parser.add_argument('--output-map')
 parser.add_argument('--output-file')
+parser.add_argument('--transformation-catalog')
 parser.add_argument('--tags', nargs='+', default=[])
 wf.add_workflow_command_line_group(parser)
 args = parser.parse_args()
@@ -170,6 +171,13 @@ for num_event in range(num_events):
                                 data_segments=insp_data_seglists[single.ifo],
                                 tags=args.tags + [str(num_event)])
 
+        files += mini.make_qscan_plot\
+            (workflow, single.ifo, time, args.output_dir,
+             data_segments=insp_data_seglists[single.ifo],
+             injection_file=injection_xml_file,
+             tags=args.tags + [str(num_event)])
+
+
     files += mini.make_single_template_plots(workflow, insp_segs,
                             args.inspiral_data_read_name,
                             args.inspiral_data_analyzed_name, inj_params,
@@ -246,5 +254,6 @@ for num_event in range(num_events):
     layouts += list(layout.grouper(files, 2))
     num_event += 1
 
-workflow.save(filename=args.output_file, output_map_path=args.output_map)
+workflow.save(filename=args.output_file, output_map_path=args.output_map,
+              transformation_catalog_path=args.transformation_catalog)
 layout.two_column_layout(args.output_dir, layouts)

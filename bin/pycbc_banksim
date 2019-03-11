@@ -20,9 +20,9 @@ import sys
 import logging
 from numpy import complex64, float32, array
 from argparse import ArgumentParser
-from pycbc_glue.ligolw import utils as ligolw_utils
-from pycbc_glue.ligolw import table, lsctables
-from pycbc_glue.ligolw.ligolw import LIGOLWContentHandler
+from glue.ligolw import utils as ligolw_utils
+from glue.ligolw import table, lsctables
+from glue.ligolw.ligolw import LIGOLWContentHandler
 class mycontenthandler(LIGOLWContentHandler):
     pass
 lsctables.use_in(mycontenthandler)
@@ -324,7 +324,7 @@ with ctx:
     for index, signal_params in enumerate(signal_table):
         if options.verbose:
             update_progress(float(index+1)/len(signal_table))
-        if not options.use_sky_location:
+        if not options.use_sky_location and hasattr(signal_params, 'latitude'):
             signal_params.latitude = 0.
             signal_params.longitude = 0.
         stilde = get_waveform(options.signal_approximant,

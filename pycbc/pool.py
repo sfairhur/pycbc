@@ -8,6 +8,17 @@ import types
 import signal
 import atexit
 
+def is_main_process():
+    """ Check if this is the main control process and may handle one time tasks
+    """
+    try:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        return rank == 0
+    except (ImportError, ValueError, RuntimeError):
+        return True
+
 # Allow the pool to be interrupted, need to disable the children processes
 # from intercepting the keyboard interrupt
 def _noint(init, *args):
@@ -15,15 +26,15 @@ def _noint(init, *args):
     if init is not None:
         return init(*args)
 
-_process_lock = None    
-_numdone = None    
+_process_lock = None
+_numdone = None
 def _lockstep_fcn(values):
     """ Wrapper to ensure that all processes execute together """
     numrequired, fcn, args = values
     with _process_lock:
         _numdone.value += 1
     # yep this is an ugly busy loop, do something better please
-    # when we care about the performance of this call and not just the 
+    # when we care about the performance of this call and not just the
     # guarantee it provides (ok... maybe never)
     while 1:
         if _numdone.value == numrequired:
@@ -44,7 +55,7 @@ class BroadcastPool(multiprocessing.pool.Pool):
         noint = functools.partial(_noint, initializer)
         super(BroadcastPool, self).__init__(processes, noint, initargs, **kwds)
         atexit.register(_shutdown_pool, self)
-        
+
     def __len__(self):
         return len(self._pool)
 
@@ -86,7 +97,7 @@ class BroadcastPool(multiprocessing.pool.Pool):
                 raise KeyboardInterrupt
 
 def _dummy_broadcast(self, f, args):
-    self.map(f, [args] * self.size)    
+    self.map(f, [args] * self.size)
 
 class SinglePool(object):
     def broadcast(self, fcn, args):
@@ -102,6 +113,7 @@ def choose_pool(processes, mpi=False):
             pool = schwimmbad.choose_pool(mpi=mpi,
                                           processes=processes)
             pool.broadcast = types.MethodType(_dummy_broadcast, pool)
+            atexit.register(pool.close)
         except ImportError:
             raise ValueError("Failed to start up an MPI pool, "
                              "install mpi4py / schwimmbadd")

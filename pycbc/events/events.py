@@ -39,14 +39,18 @@ from . import coinc
 def threshold(series, value):
     """Return list of values and indices values over threshold in series.
     """
-    return None, None
-    
+    err_msg = "This function is a stub that should be overridden using the "
+    err_msg += "scheme. You shouldn't be seeing this error!"
+    raise ValueError(err_msg)
+
 @schemed("pycbc.events.threshold_")
 def threshold_only(series, value):
     """Return list of values and indices whose values in series are
        larger (in absolute value) than value
     """
-    return None, None
+    err_msg = "This function is a stub that should be overridden using the "
+    err_msg += "scheme. You shouldn't be seeing this error!"
+    raise ValueError(err_msg)
 
 #FIXME: This should be under schemed, but I don't understand that yet!
 def threshold_real_numpy(series, value):
@@ -59,17 +63,21 @@ def threshold_real_numpy(series, value):
 def threshold_and_cluster(series, threshold, window):
     """Return list of values and indices values over threshold in series.
     """
-    return
+    err_msg = "This function is a stub that should be overridden using the "
+    err_msg += "scheme. You shouldn't be seeing this error!"
+    raise ValueError(err_msg)
 
 @schemed("pycbc.events.threshold_")
 def _threshold_cluster_factory(series):
-    return
+    err_msg = "This class is a stub that should be overridden using the "
+    err_msg += "scheme. You shouldn't be seeing this error!"
+    raise ValueError(err_msg)
 
 class ThresholdCluster(object):
     """Create a threshold and cluster engine
 
     Parameters
-    ----------
+    -----------
     series : complex64
       Input pycbc.types.Array (or subclass); it will be searched for
       points above threshold that are then clustered
@@ -92,7 +100,7 @@ class _BaseThresholdCluster(object):
         Threshold and cluster the memory specified at instantiation with the
         threshold specified at creation and the window size specified at creation.
 
-        Parameters:
+        Parameters
         -----------
         threshold : float32
           The minimum absolute value of the series given at object initialization
@@ -190,7 +198,8 @@ def newsnr(snr, reduced_x2, q=6., n=2.):
     ind = numpy.where(reduced_x2 > 1.)[0]
     newsnr[ind] *= ( 0.5 * (1. + reduced_x2[ind] ** (q/n)) ) ** (-1./q)
 
-    if len(newsnr) > 1:
+    # If snr input is float, return a float. Otherwise return numpy array.
+    if hasattr(snr, '__len__'):
         return newsnr
     else:
         return newsnr[0]
@@ -205,7 +214,8 @@ def newsnr_sgveto(snr, bchisq, sgchisq):
     if len(t) > 0:
         nsnr[t] = nsnr[t] / (sgchisq[t] / 4.0) ** 0.5
 
-    if len(nsnr) > 1:
+    # If snr input is float, return a float. Otherwise return numpy array.
+    if hasattr(snr, '__len__'):
         return nsnr
     else:
         return nsnr[0]
@@ -218,7 +228,8 @@ def effsnr(snr, reduced_x2, fac=250.):
     rchisq = numpy.array(reduced_x2, ndmin=1, dtype=numpy.float64)
     effsnr = snr / (1 + snr ** 2 / fac) ** 0.25 / rchisq ** 0.25
 
-    if len(effsnr) > 1:
+    # If snr input is float, return a float. Otherwise return numpy array.
+    if hasattr(snr, '__len__'):
         return effsnr
     else:
         return effsnr[0]
@@ -233,6 +244,7 @@ class EventManager(object):
             self.event_dtype.append( (column, coltype) )
 
         self.events = numpy.array([], dtype=self.event_dtype)
+        self.accumulate = [self.events]
         self.template_params = []
         self.template_index = -1
         self.template_events = numpy.array([], dtype=self.event_dtype)
@@ -269,12 +281,12 @@ class EventManager(object):
         remove = [i for i, e in enumerate(self.events) if \
             newsnr(abs(e['snr']), e['chisq'] / e['chisq_dof']) < threshold]
         self.events = numpy.delete(self.events, remove)
-        
+
     def keep_near_injection(self, window, injections):
         from pycbc.events.veto import indices_within_times
         if len(self.events) == 0:
             return
-        
+
         inj_time = numpy.array(injections.end_times())
         gpstime = self.events['time_index'].astype(numpy.float64)
         gpstime = gpstime / self.opt.sample_rate + self.opt.gps_start_time
@@ -284,14 +296,14 @@ class EventManager(object):
     def keep_loudest_in_interval(self, window, num_keep):
         if len(self.events) == 0:
             return
-        
+
         e = self.events
         stat = newsnr(abs(e['snr']), e['chisq'] / e['chisq_dof'])
         time = e['time_index']
-        
+
         wtime = (time / window).astype(numpy.int32)
         bins = numpy.unique(wtime)
-        
+
         keep = []
         for b in bins:
             bloc = numpy.where((wtime == b))[0]
@@ -299,49 +311,6 @@ class EventManager(object):
             keep.append(bloc[bloudest])
         keep = numpy.concatenate(keep)
         self.events = e[keep]
-
-    def maximize_over_bank(self, tcolumn, column, window):
-        if len(self.events) == 0:
-            return
-
-        self.events = numpy.sort(self.events, order=tcolumn)
-        cvec = self.events[column]
-        tvec = self.events[tcolumn]
-
-        indices = []
-#        mint = tvec.min()
-#        maxt = tvec.max()
-#        edges = numpy.arange(mint, maxt, window)
-
-#        # Get the location of each time bin
-#        bins = numpy.searchsorted(tvec, edges)
-#        bins = numpy.append(bins, len(tvec))
-#        for i in range(len(bins)-1):
-#            kmin = bins[i]
-#            kmax = bins[i+1]
-#            if kmin == kmax:
-#                continue
-#            event_idx = numpy.argmax(cvec[kmin:kmax]) + kmin
-#            indices.append(event_idx)
-
-        # This algorithm is confusing, but it is what lalapps_inspiral does
-        # REMOVE ME!!!!!!!!!!!
-        gps = tvec.astype(numpy.float64) / self.opt.sample_rate + self.opt.gps_start_time
-        gps_sec  = numpy.floor(gps)
-        gps_nsec = (gps - gps_sec) * 1e9
-
-        wnsec = int(window * 1e9 / self.opt.sample_rate)
-        win = gps_nsec.astype(int) / wnsec
-
-        indices.append(0)
-        for i in xrange(len(tvec)):
-            if gps_sec[i] == gps_sec[indices[-1]] and  win[i] == win[indices[-1]]:
-                    if abs(cvec[i]) > abs(cvec[indices[-1]]):
-                        indices[-1] = i
-            else:
-                indices.append(i)
-
-        self.events = numpy.take(self.events, indices)
 
     def add_template_events(self, columns, vectors):
         """ Add a vector indexed """
@@ -379,8 +348,11 @@ class EventManager(object):
         self.template_params[-1].update(kwds)
 
     def finalize_template_events(self):
-        self.events = numpy.append(self.events, self.template_events)
+        self.accumulate.append(self.template_events)
         self.template_events = numpy.array([], dtype=self.event_dtype)
+
+    def finalize_events(self):
+        self.events = numpy.concatenate(self.accumulate)
 
     def make_output_dir(self, outname):
         path = os.path.dirname(outname)
@@ -483,6 +455,9 @@ class EventManager(object):
             if 'sg_chisq' in self.events.dtype.names:
                 f['sg_chisq'] = self.events['sg_chisq']
 
+            if self.opt.psdvar_short_segment is not None:
+                f['psd_var_val'] = self.events['psd_var_val']
+
         if self.opt.trig_start_time:
             f['search/start_time'] = numpy.array([self.opt.trig_start_time])
             search_start_time = float(self.opt.trig_start_time)
@@ -507,6 +482,7 @@ class EventManager(object):
                 numpy.array([filters_per_core / float(self.run_time)])
             f['search/setup_time_fraction'] = \
                 numpy.array([float(self.setup_time) / float(self.run_time)])
+            f['search/run_time'] = numpy.array([float(self.run_time)])
 
         if 'q_trans' in self.global_params:
             qtrans = self.global_params['q_trans']
@@ -624,7 +600,7 @@ class EventManagerMultiDet(EventManager):
         """ Write the found events to a sngl inspiral table
         """
         self.make_output_dir(outname)
- 
+
         if '.hdf' in outname:
             self.write_to_hdf(outname)
         else:
@@ -710,6 +686,9 @@ class EventManagerMultiDet(EventManager):
 
                 f['template_hash'] = th[tid]
 
+                if self.opt.psdvar_short_segment is not None:
+                    f['psd_var_val'] = ifo_events['psd_var_val']
+
             if self.opt.trig_start_time:
                 f['search/start_time'] = numpy.array([\
                         self.opt.trig_start_time[ifo]], dtype=numpy.int32)
@@ -757,5 +736,5 @@ class EventManagerMultiDet(EventManager):
 __all__ = ['threshold_and_cluster', 'newsnr', 'effsnr', 'newsnr_sgveto',
            'findchirp_cluster_over_window',
            'threshold', 'cluster_reduce', 'ThresholdCluster',
-           'threshold_real_numpy',
+           'threshold_real_numpy', 'threshold_only',
            'EventManager', 'EventManagerMultiDet']

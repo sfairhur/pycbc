@@ -31,7 +31,7 @@ https://ldas-jobs.ligo.caltech.edu/~cbc/docs/pycbc/ahope.html
 import logging
 import math, os
 import lal
-from pycbc_glue import segments
+from ligo import segments
 import Pegasus.DAX3 as dax
 from pycbc.workflow.core import Executable, File, FileList, Node
 
@@ -40,13 +40,22 @@ def int_gps_time_to_str(t):
     converts it to a string. If a LIGOTimeGPS with nonzero decimal part is
     given, raises a ValueError."""
 
-    if type(t) == int:
+    if isinstance(t, int):
         return str(t)
-    elif type(t) == lal.LIGOTimeGPS:
+    elif isinstance(t, float):
+        # Wouldn't this just work generically?
+        int_t = int(t)
+        if abs(t - int_t) > 0.:
+            raise ValueError('Need an integer GPS time, got %s' % str(t))
+        return str(int_t)
+    elif isinstance(t, lal.LIGOTimeGPS):
         if t.gpsNanoSeconds == 0:
             return str(t.gpsSeconds)
         else:
             raise ValueError('Need an integer GPS time, got %s' % str(t))
+    else:
+        err_msg = "Didn't understand input type {}".format(type(t))
+        raise ValueError(err_msg)
 
 def select_tmpltbank_class(curr_exe):
     """ This function returns a class that is appropriate for setting up
@@ -199,7 +208,7 @@ def sngl_ifo_job_setup(workflow, ifo, out_files, curr_exe_job, science_segs,
         to this list, and it does not need to be empty when supplied.
     curr_exe_job : Job
         An instanced of the Job class that has a get_valid times method.
-    science_segs : glue.segments.segmentlist
+    science_segs : ligo.segments.segmentlist
         The list of times that the jobs should cover
     datafind_outs : pycbc.workflow.core.FileList
         The file list containing the datafind files.
@@ -309,7 +318,7 @@ def sngl_ifo_job_setup(workflow, ifo, out_files, curr_exe_job, science_segs,
 
 def multi_ifo_coherent_job_setup(workflow, out_files, curr_exe_job,
                                  science_segs, datafind_outs, output_dir,
-                                 parents=None, tags=None):
+                                 parents=None, slide_dict=None, tags=None):
     """
     Method for setting up coherent inspiral jobs.
     """
@@ -335,7 +344,8 @@ def multi_ifo_coherent_job_setup(workflow, out_files, curr_exe_job,
             tag.append(split_bank.tag_str)
             node = curr_exe_job.create_node(data_seg, job_valid_seg,
                     parent=split_bank, dfParents=frame_files,
-                    bankVetoBank=bank_veto, ipn_file=ipn_sky_points, tags=tag)
+                    bankVetoBank=bank_veto, ipn_file=ipn_sky_points,
+                    slide=slide_dict, tags=tag)
             workflow.add_node(node)
             split_bank_counter += 1
             curr_out_files.extend(node.output_files)
@@ -1615,3 +1625,123 @@ class PycbcConditionStrainExecutable(Executable):
 
         return node, out_file
 
+class PycbcCreateInjectionsExecutable(Executable):
+    """ The class responsible for creating jobs
+    for ``pycbc_create_injections``.
+    """
+
+    current_retention_level = Executable.ALL_TRIGGERS
+    def __init__(self, cp, exe_name, ifo=None, out_dir=None,
+                 universe=None, tags=None):
+        super(PycbcCreateInjectionsExecutable, self).__init__(
+                               cp, exe_name, universe, ifo, out_dir, tags)
+
+    def create_node(self, config_file=None, seed=None, tags=None):
+        """ Set up a CondorDagmanNode class to run ``pycbc_create_injections``.
+
+        Parameters
+        ----------
+        config_file : pycbc.workflow.core.File
+            A ``pycbc.workflow.core.File`` for inference configuration file
+            to be used with ``--config-files`` option.
+        seed : int
+            Seed to use for generating injections.
+        tags : list
+            A list of tags to include in filenames.
+
+        Returns
+        --------
+        node : pycbc.workflow.core.Node
+            The node to run the job.
+        """
+
+        # default for tags is empty list
+        tags = [] if tags is None else tags
+
+        # get analysis start and end time
+        start_time = self.cp.get("workflow", "start-time")
+        end_time = self.cp.get("workflow", "end-time")
+        analysis_time = segments.segment(int(start_time), int(end_time))
+
+        # make node for running executable
+        node = Node(self)
+        node.add_input_opt("--config-file", config_file)
+        if seed:
+            node.add_opt("--seed", seed)
+        injection_file = node.new_output_file_opt(analysis_time,
+                                                  ".hdf", "--output-file",
+                                                  tags=tags)
+
+        return node, injection_file
+
+class PycbcInferenceExecutable(Executable):
+    """ The class responsible for creating jobs for ``pycbc_inference``.
+    """
+
+    current_retention_level = Executable.ALL_TRIGGERS
+    def __init__(self, cp, exe_name, ifo=None, out_dir=None,
+                 universe=None, tags=None):
+        super(PycbcInferenceExecutable, self).__init__(cp, exe_name, universe,
+                                                       ifo, out_dir, tags)
+
+    def create_node(self, channel_names, config_file, injection_file=None,
+                    seed=None, fake_strain_seed=None, tags=None):
+        """ Set up a CondorDagmanNode class to run ``pycbc_inference``.
+
+        Parameters
+        ----------
+        channel_names : dict
+            A ``dict`` of ``str`` to use for ``--channel-name`` option.
+        config_file : pycbc.workflow.core.File
+            A ``pycbc.workflow.core.File`` for inference configuration file
+            to be used with ``--config-files`` option.
+        injection_file : pycbc.workflow.core.File
+            A ``pycbc.workflow.core.File`` for injection file to be used
+            with ``--injection-file`` option.
+        seed : int
+            An ``int`` to be used with ``--seed`` option.
+        fake_strain_seed : dict
+            An ``int`` to be used with ``--fake-strain-seed`` option.
+        tags : list
+            A list of tags to include in filenames.
+
+        Returns
+        --------
+        node : pycbc.workflow.core.Node
+            The node to run the job.
+        """
+
+        # default for tags is empty list
+        tags = [] if tags is None else tags
+
+        # get analysis start and end time
+        start_time = self.cp.get("workflow", "start-time")
+        end_time = self.cp.get("workflow", "end-time")
+        analysis_time = segments.segment(int(start_time), int(end_time))
+
+        # get multi-IFO opts
+        channel_names_opt = " ".join(["{}:{}".format(k, v)
+                                      for k, v in channel_names.iteritems()])
+        if fake_strain_seed is not None:
+            fake_strain_seed_opt = " ".join([
+                                    "{}:{}".format(k, v)
+                                    for k, v in fake_strain_seed.iteritems()])
+
+        # make node for running executable
+        node = Node(self)
+        node.add_opt("--instruments", " ".join(self.ifo_list))
+        node.add_opt("--gps-start-time", start_time)
+        node.add_opt("--gps-end-time", end_time)
+        node.add_opt("--channel-name", channel_names_opt)
+        node.add_input_opt("--config-file", config_file)
+        if fake_strain_seed is not None:
+            node.add_opt("--fake-strain-seed", fake_strain_seed_opt)
+        if injection_file:
+            node.add_input_opt("--injection-file", injection_file)
+        if seed:
+            node.add_opt("--seed", seed)
+        inference_file = node.new_output_file_opt(analysis_time,
+                                                  ".hdf", "--output-file",
+                                                  tags=tags)
+
+        return node, inference_file

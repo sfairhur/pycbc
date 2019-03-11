@@ -69,11 +69,11 @@ class ReadByTemplate(object):
         self.file = h5py.File(filename, 'r')
         self.ifo = self.file.keys()[0]
         self.valid = None
-        self.bank = h5py.File(bank) if bank else None
+        self.bank = h5py.File(bank, 'r') if bank else None
 
         # Determine the segments which define the boundaries of valid times
         # to use triggers
-        from pycbc_glue.segments import segmentlist, segment
+        from ligo.segments import segmentlist, segment
         key = '%s/search/' % self.ifo
         s, e = self.file[key + 'start_time'][:], self.file[key + 'end_time'][:]
         self.segs = veto.start_end_to_segments(s, e).coalesce()
