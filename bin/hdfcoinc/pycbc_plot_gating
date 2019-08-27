@@ -13,6 +13,7 @@ from matplotlib.patches import Rectangle
 import mpld3
 import mpld3.plugins
 from pycbc.results.color import ifo_color
+from pycbc.results.mpld3_utils import MPLSlide
 import pycbc.version
 
 
@@ -31,10 +32,11 @@ log_date_fmt = '%Y-%m-%d %H:%M:%S'
 logging.basicConfig(level=logging.INFO, format=log_fmt, datefmt=log_date_fmt)
 
 gate_data = {}
+have_gates = False
 for fn in args.input_file:
     logging.info('Reading gates from %s', fn)
     f = h5py.File(fn, 'r')
-    ifo = f.keys()[0]
+    ifo = tuple(f.keys())[0]
     for gate_type in ['file', 'auto']:
         try:
             gate_time = f[ifo + '/gating/' + gate_type + '/time'][:]
@@ -46,12 +48,14 @@ for fn in args.input_file:
         if not key in gate_data:
             gate_data[key] = []
         gate_data[key] += [g for g in zip(gate_time, gate_width, gate_pad)]
+        have_gates = have_gates or (len(gate_data[key]) > 0)
 
+mpld3.plugins.DEFAULT_PLUGINS = []
 fig = pl.figure(figsize=(10, 5))
 ax = fig.gca()
 ax.set_yticks([])
 
-if len(gate_data) > 0:
+if have_gates:
     t_min = t_max = None
     total_time = {}
     total_time_pad = {}
@@ -90,7 +94,8 @@ else:
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
 
-mpld3.plugins.connect(fig, mpld3.plugins.MousePosition(fontsize=14, fmt='10f'))
+mpld3.plugins.connect(fig, mpld3.plugins.MousePosition(fontsize=14, fmt='10.1f'))
 mpld3.plugins.connect(fig, mpld3.plugins.BoxZoom())
+mpld3.plugins.connect(fig, MPLSlide())
 mpld3.plugins.connect(fig, mpld3.plugins.Reset())
-mpld3.save_html(fig, open(args.output_file, 'wb'))
+mpld3.save_html(fig, open(args.output_file, 'w'))

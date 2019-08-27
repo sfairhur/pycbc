@@ -1,3 +1,2 @@
-from pycbc.io.sqlite import *
-from pycbc.io.hdf import *
-
+from .hdf import *
+from .record import *

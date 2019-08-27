@@ -21,12 +21,15 @@
 #
 # =============================================================================
 #
+from __future__ import absolute_import
 import numpy
 from pycbc import WEAVE_FLAGS
-from scipy.weave import inline
+from pycbc.weave import inline
 from .simd_threshold import thresh_cluster_support, default_segsize
-from .events import _BaseThresholdCluster
+from .eventmgr import _BaseThresholdCluster
 from pycbc.opt import omp_libs, omp_flags
+from scipy.signal import find_peaks
+from six import PY3
 
 def threshold_numpy(series, value):
     arr = series.data
@@ -40,26 +43,26 @@ outl = None
 outv = None
 count = None
 def threshold_inline(series, value):
-    arr = numpy.array(series.data.view(dtype=numpy.float32), copy=False)
+    arr = numpy.array(series.data.view(dtype=numpy.float32), copy=False) # pylint:disable=unused-variable
     global outl, outv, count
     if outl is None or len(outl) < len(series):
         outl = numpy.zeros(len(series), dtype=numpy.uint32)
         outv = numpy.zeros(len(series), dtype=numpy.complex64)
         count = numpy.zeros(1, dtype=numpy.uint32)
-        
-    N = len(series)
-    threshold = value**2.0
-    code = """  
+
+    N = len(series) # pylint:disable=unused-variable
+    threshold = value**2.0 # pylint:disable=unused-variable
+    code = """
         float v = threshold;
         unsigned int num_parallel_regions = 16;
         unsigned int t=0;
-     
+
         #pragma omp parallel for ordered shared(t)
         for (unsigned int p=0; p<num_parallel_regions; p++){
             unsigned int start  = (N * p) / num_parallel_regions;
             unsigned int end    = (N * (p+1)) / num_parallel_regions;
             unsigned int c = 0;
-            
+
             for (unsigned int i=start; i<end; i++){
                 float r = arr[i*2];
                 float im = arr[i*2+1];
@@ -68,8 +71,8 @@ def threshold_inline(series, value):
                     outv[c+start] = std::complex<float>(r, im);
                     c++;
                 }
-            } 
-            
+            }
+
             #pragma omp ordered
             {
                 t+=c;
@@ -77,12 +80,12 @@ def threshold_inline(series, value):
             memmove(outl+t-c, outl+start, sizeof(unsigned int)*c);
             memmove(outv+t-c, outv+start, sizeof(std::complex<float>)*c);
 
-        }       
-        
+        }
+
         count[0] = t;
     """
     inline(code, ['N', 'arr', 'outv', 'outl', 'count', 'threshold'],
-                    extra_compile_args=[WEAVE_FLAGS + '-march=native -O3 -w'] + omp_flags,
+                    extra_compile_args=[WEAVE_FLAGS] + omp_flags,
                     libraries=omp_libs
           )
     num = count[0]
@@ -91,7 +94,11 @@ def threshold_inline(series, value):
     else:
         return numpy.array([], numpy.uint32), numpy.array([], numpy.float32)
 
-threshold=threshold_inline
+
+if PY3:
+    threshold = threshold_numpy
+else:
+    threshold=threshold_inline
 
 class CPUThresholdCluster(_BaseThresholdCluster):
     def __init__(self, series):
@@ -107,14 +114,14 @@ class CPUThresholdCluster(_BaseThresholdCluster):
               """
         self.support = thresh_cluster_support
 
-    def threshold_and_cluster(self, threshold, window):
-        series = self.series
-        slen = self.slen
+    def threshold_and_cluster_weave(self, threshold, window): # pylint:disable=unused-variable
+        series = self.series # pylint:disable=unused-variable
+        slen = self.slen # pylint:disable=unused-variable
         values = self.outv
         locs = self.outl
-        segsize = self.segsize
+        segsize = self.segsize # pylint:disable=unused-variable
         self.count = inline(self.code, ['series', 'slen', 'values', 'locs', 'threshold', 'window', 'segsize'],
-                            extra_compile_args = [WEAVE_FLAGS + '-march=native -O3 -w'] + omp_flags,
+                            extra_compile_args = [WEAVE_FLAGS] + omp_flags,
                             #extra_compile_args = ['-mno-avx -mno-sse2 -mno-sse3 -mno-ssse3 -mno-sse4 -mno-sse4.1 -mno-sse4.2 -mno-sse4a -O2 -w'] + omp_flags,
                             #extra_compile_args = ['-msse3 -O3 -w'] + omp_flags,
                             support_code = self.support, libraries = omp_libs,
@@ -123,6 +130,19 @@ class CPUThresholdCluster(_BaseThresholdCluster):
             return values[0:self.count], locs[0:self.count]
         else:
             return numpy.array([], dtype = numpy.complex64), numpy.array([], dtype = numpy.uint32)
+
+    def threshold_and_cluster(self, threshold, window):
+        # Python 2 can use the fast weave version
+        if not PY3:
+            return self.threshold_and_cluster_weave(threshold, window)
+
+        # Python 3 for now can use scipy. Someone can optimize this
+        # (e.g. in Cython) if needed
+        thresh = threshold*threshold
+        abs2_series = self.series.real**2 + self.series.imag**2
+        locs, _ = find_peaks(abs2_series, height=thresh, distance=window)
+        return self.series[locs], locs
+
 
 def _threshold_cluster_factory(series):
     return CPUThresholdCluster

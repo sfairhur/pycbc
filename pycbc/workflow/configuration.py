@@ -1,4 +1,4 @@
-# Copyright (C) 2013  Ian Harry
+# Copyright (C) 2013,2017 Ian Harry, Duncan Brown
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by the
@@ -29,10 +29,244 @@ https://ldas-jobs.ligo.caltech.edu/~cbc/docs/pycbc/ahope/initialization_inifile.
 
 import os
 import re
+import stat
+import string
+import shutil
+import time
+import logging
+import requests
 import distutils.spawn
-import ConfigParser
+import itertools
+import six
+from six.moves import configparser as ConfigParser
+from six.moves.urllib.parse import urlparse
+from six.moves import http_cookiejar as cookielib
+from six.moves.http_cookiejar import (_warn_unhandled_exception,
+                                      LoadError, Cookie)
 import glue.pipeline
-import pycbc.workflow
+from bs4 import BeautifulSoup
+
+def _really_load(self, f, filename, ignore_discard, ignore_expires):
+    """
+    This function is required to monkey patch MozillaCookieJar's _really_load
+    function which does not understand the curl format cookie file created
+    by ecp-cookie-init. It patches the code so that #HttpOnly_ get loaded.
+
+    https://bugs.python.org/issue2190
+    https://bugs.python.org/file37625/httponly.patch
+    """
+    now = time.time()
+
+    magic = f.readline()
+    if not re.search(self.magic_re, magic):
+        f.close()
+        raise LoadError(
+            "%r does not look like a Netscape format cookies file" %
+            filename)
+
+    try:
+        while 1:
+            line = f.readline()
+            if line == "": break
+
+            # last field may be absent, so keep any trailing tab
+            if line.endswith("\n"): line = line[:-1]
+
+            sline = line.strip()
+            # support HttpOnly cookies (as stored by curl or old Firefox).
+            if sline.startswith("#HttpOnly_"):
+                line = sline[10:]
+            # skip comments and blank lines ... what is $ for?
+            elif (sline.startswith(("#", "$")) or sline == ""):
+                continue
+
+            domain, domain_specified, path, secure, expires, name, value = \
+                    line.split("\t")
+            secure = (secure == "TRUE")
+            domain_specified = (domain_specified == "TRUE")
+            if name == "":
+                # cookies.txt regards 'Set-Cookie: foo' as a cookie
+                # with no name, whereas cookielib regards it as a
+                # cookie with no value.
+                name = value
+                value = None
+
+            initial_dot = domain.startswith(".")
+            assert domain_specified == initial_dot
+
+            discard = False
+            if expires == "":
+                expires = None
+                discard = True
+
+            # assume path_specified is false
+            c = Cookie(0, name, value,
+                       None, False,
+                       domain, domain_specified, initial_dot,
+                       path, False,
+                       secure,
+                       expires,
+                       discard,
+                       None,
+                       None,
+                       {})
+            if not ignore_discard and c.discard:
+                continue
+            if not ignore_expires and c.is_expired(now):
+                continue
+            self.set_cookie(c)
+
+    except IOError:
+        raise
+    except Exception:
+        _warn_unhandled_exception()
+        raise LoadError("invalid Netscape format cookies file %r: %r" %
+                        (filename, line))
+
+# Now monkey patch the code
+cookielib.MozillaCookieJar._really_load = _really_load # noqa
+
+ecp_cookie_error = """The attempt to download the file at
+
+{}
+
+was redirected to the git.ligo.org sign-in page. This means that you likely
+forgot to initialize your ECP cookie or that your LIGO.ORG credentials are
+otherwise invalid. Create a valid ECP cookie for git.ligo.org by running
+
+ecp-cookie-init LIGO.ORG https://git.ligo.org/users/auth/shibboleth/callback albert.einstein
+
+before attempting to download files from git.ligo.org.
+"""
+
+def istext(s, text_characters=None, threshold=0.3):
+    """
+    Determines if the string is a set of binary data or a text file.
+    This is done by checking if a large proportion of characters are > 0X7E
+    (0x7F is <DEL> and unprintable) or low bit control codes. In other words
+    things that you wouldn't see (often) in a text file. (ASCII past 0x7F
+    might appear, but rarely).
+
+    Code modified from
+    https://www.safaribooksonline.com/library/view/python-cookbook-2nd/0596007973/ch01s12.html
+    """
+    # if s contains any null, it's not text:
+    if six.PY2 and "\0" in s:
+        return False
+    # an "empty" string is "text" (arbitrary but reasonable choice):
+    if not s:
+        return True
+
+    text_characters = "".join(map(chr, range(32, 127))) + "\n\r\t\b"
+    if six.PY2:
+        _null_trans = string.maketrans("", "")
+        # Get the substring of s made up of non-text characters
+        t = s.translate(_null_trans, text_characters)
+    else:
+        # Not yet sure how to deal with this in python3. Will need example.
+        return True
+
+        # trans = str.maketrans('', '', text_characters)
+        # t = s.translate(trans)
+
+    # s is 'text' if less than 30% of its characters are non-text ones:
+    return len(t)/float(len(s)) <= threshold
+
+def resolve_url(url, directory=None, permissions=None):
+    """
+    Resolves a URL to a local file, and returns the path to
+    that file.
+    """
+
+    u = urlparse(url)
+
+    # create the name of the destination file
+    if directory is None:
+        directory = os.getcwd()
+    filename = os.path.join(directory,os.path.basename(u.path))
+
+    if u.scheme == '' or u.scheme == 'file':
+        # for regular files, make a direct copy
+        if os.path.isfile(u.path):
+            if os.path.isfile(filename):
+                # check to see if src and dest are the same file
+                src_inode = os.stat(u.path)[stat.ST_INO]
+                dst_inode = os.stat(filename)[stat.ST_INO]
+                if src_inode != dst_inode:
+                    shutil.copy(u.path, filename)
+            else:
+                shutil.copy(u.path, filename)
+        else:
+            errmsg  = "Cannot open file %s from URL %s" % (u.path, url)
+            raise ValueError(errmsg)
+
+    elif u.scheme == 'http' or u.scheme == 'https':
+        s = requests.Session()
+        s.mount(str(u.scheme)+'://',
+            requests.adapters.HTTPAdapter(max_retries=5))
+
+        # look for an ecp cookie file and load the cookies
+        cookie_dict = {}
+        ecp_file = '/tmp/ecpcookie.u%d' % os.getuid()
+        if os.path.isfile(ecp_file):
+            cj = cookielib.MozillaCookieJar()
+            cj.load(ecp_file, ignore_discard=True, ignore_expires=True)
+        else:
+            cj = []
+
+        for c in cj:
+            if c.domain == u.netloc:
+                # load cookies for this server
+                cookie_dict[c.name] = c.value
+            elif u.netloc == "code.pycbc.phy.syr.edu" and \
+              c.domain == "git.ligo.org":
+                # handle the redirect for code.pycbc to git.ligo.org
+                cookie_dict[c.name] = c.value
+
+        r = s.get(url, cookies=cookie_dict, allow_redirects=True)
+        if r.status_code != 200:
+            errmsg = "Unable to download %s\nError code = %d" % (url,
+                r.status_code)
+            raise ValueError(errmsg)
+
+        # if we are downloading from git.ligo.org, check that we
+        # did not get redirected to the sign-in page
+        if u.netloc == 'git.ligo.org' or u.netloc == 'code.pycbc.phy.syr.edu':
+            # Check if we have downloaded a binary file.
+            if istext(r.content):
+                soup = BeautifulSoup(r.content, 'html.parser')
+                desc = soup.findAll(attrs={"property":"og:url"})
+                if len(desc) and \
+                  desc[0]['content'] == 'https://git.ligo.org/users/sign_in':
+                    raise ValueError(ecp_cookie_error.format(url))
+
+        output_fp = open(filename, 'wb')
+        output_fp.write(r.content)
+        output_fp.close()
+
+    else:
+        # TODO: We could support other schemes such as gsiftp by
+        # calling out to globus-url-copy
+        errmsg  = "Unknown URL scheme: %s\n" % (u.scheme)
+        errmsg += "Currently supported are: file, http, and https."
+        raise ValueError(errmsg)
+
+    if not os.path.isfile(filename):
+        errmsg = "Error trying to create file %s from %s" % (filename,url)
+        raise ValueError(errmsg)
+
+    if permissions:
+        if os.access(filename, os.W_OK):
+            os.chmod(filename, permissions)
+        else:
+            # check that the file has at least the permissions requested
+            s = os.stat(filename)[stat.ST_MODE]
+            if (s & permissions) != permissions:
+                errmsg = "Could not change permissions on %s (read-only)" % url
+                raise ValueError(errmsg)
+
+    return filename
+
 
 def add_workflow_command_line_group(parser):
     """
@@ -53,6 +287,18 @@ def add_workflow_command_line_group(parser):
 
     where the value will be left as ''.
 
+    To remove a configuration option, use the command line argument
+
+    --config-delete section1:option1
+
+    which will delete option1 from [section1] or
+
+    --config-delete section1
+
+    to delete all of the options in [section1]
+
+    Deletes are implemented before overrides.
+
     This function returns an argparse OptionGroup to ensure these options are
     parsed correctly and can then be sent directly to initialize an
     WorkflowConfigParser.
@@ -62,15 +308,30 @@ def add_workflow_command_line_group(parser):
     parser : argparse.ArgumentParser instance
         The initialized argparse instance to add the workflow option group to.
     """
-    workflowArgs = parser.add_argument_group('workflow',
-                                          'Options needed for workflow setup.')
+    workflowArgs = parser.add_argument_group('Configuration',
+                                             'Options needed for parsing '
+                                             'config file(s).')
     workflowArgs.add_argument("--config-files", nargs="+", action='store',
                            metavar="CONFIGFILE",
                            help="List of config files to be used in "
                                 "analysis.")
     workflowArgs.add_argument("--config-overrides", nargs="*", action='store',
                            metavar="SECTION:OPTION:VALUE",
-                           help="List of section,option,value combinations to add into the configuration file. Normally the gps start and end times might be provided this way, and user specific locations (ie. output directories). This can also be provided as SECTION:OPTION or SECTION:OPTION: both of which indicate that the corresponding value is left blank.")
+                           help="List of section,option,value combinations to "
+                           "add into the configuration file. Normally the gps "
+                           "start and end times might be provided this way, "
+                           "and user specific locations (ie. output directories). "
+                           "This can also be provided as SECTION:OPTION or "
+                           "SECTION:OPTION: both of which indicate that the "
+                           "corresponding value is left blank.")
+    workflowArgs.add_argument("--config-delete", nargs="*", action='store',
+                           metavar="SECTION:OPTION",
+                           help="List of section,option combinations to delete "
+                           "from the configuration file. This can also be "
+                           "provided as SECTION which deletes the enture section"
+                           " from the configuration file or SECTION:OPTION "
+                           "which deletes a specific option from a given "
+                           "section.")
 
 
 class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
@@ -78,12 +339,12 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
     This is a sub-class of glue.pipeline.DeepCopyableConfigParser, which lets
     us add a few additional helper features that are useful in workflows.
     """
-    def __init__(self, configFiles=[], overrideTuples=[], parsedFilePath=None):
+    def __init__(self, configFiles=None, overrideTuples=None, parsedFilePath=None, deleteTuples=None):
         """
         Initialize an WorkflowConfigParser. This reads the input configuration
         files, overrides values if necessary and performs the interpolation.
         See https://ldas-jobs.ligo.caltech.edu/~cbc/docs/pycbc/ahope/initialization_inifile.html
-        
+
         Parameters
         -----------
         configFiles : Path to .ini file, or list of paths
@@ -94,30 +355,66 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             pair is already present, it will be overwritten.
         parsedFilePath : Path, optional (default=None)
             If given, write the parsed .ini file back to disk at this location.
+        deleteTuples : List of (section, option) tuples
+            Delete the (section, option) pairs provided
+            in this list from provided .ini file(s). If the section only
+            is provided, the entire section will be deleted.
 
         Returns
         --------
         WorkflowConfigParser
             Initialized WorkflowConfigParser instance.
         """
+        if configFiles is None:
+            configFiles = []
+        if overrideTuples is None:
+            overrideTuples = []
+        if deleteTuples is None:
+            deleteTuples = []
         glue.pipeline.DeepCopyableConfigParser.__init__(self)
-        
+
         # Enable case sensitive options
         self.optionxform = str
 
-        # The full path needs to be specified to avoid circular imports between
-        # this file and pycbc.workflow.core
-        configFiles = [pycbc.workflow.core.resolve_url(cFile) for cFile in configFiles]
+        configFiles = [resolve_url(cFile) for cFile in configFiles]
 
         self.read_ini_file(configFiles)
 
-        # Do overrides first
+        # Replace exe macros with full paths
+        self.perform_exe_expansion()
+
+        # Split sections like [inspiral&tmplt] into [inspiral] and [tmplt]
+        self.split_multi_sections()
+
+        # Populate shared options from the [sharedoptions] section
+        self.populate_shared_sections()
+
+        # Do deletes from command line
+        for delete in deleteTuples:
+            if len(delete) == 1:
+                if self.remove_section(delete[0]) is False:
+                    raise ValueError("Cannot delete section %s, "
+                        "no such section in configuration." % delete )
+                else:
+                    logging.info("Deleting section %s from configuration",
+                                 delete[0])
+            elif len(delete) == 2:
+                if self.remove_option(delete[0],delete[1]) is False:
+                    raise ValueError("Cannot delete option %s from section %s,"
+                        " no such option in configuration." % delete )
+                else:
+                    logging.info("Deleting option %s from section %s in "
+                                 "configuration", delete[1], delete[0])
+            else:
+                raise ValueError("Deletes must be tuples of length 1 or 2. "
+                    "Got %s." % str(delete) )
+
+        # Do overrides from command line
         for override in overrideTuples:
             if len(override) not in [2,3]:
-                print override
-                errMsg = "Overrides must be tuples of length 2 or 3."
-                errMsg = "Got %s." %(str(override))
-                raise ValueError(errMsg)
+                errmsg = "Overrides must be tuples of length 2 or 3."
+                errmsg = "Got %s." % (str(override) )
+                raise ValueError(errmsg)
             section = override[0]
             option = override[1]
             value = ''
@@ -127,20 +424,14 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             if not self.has_section(section):
                 self.add_section(section)
             self.set(section, option, value)
+            logging.info("Overriding section %s option %s with value %s "
+                "in configuration.", section, option, value )
 
-        # Replace exe macros with full paths
-        self.perform_exe_expansion()
-
-        # Split sections like [inspiral&tmplt] into [inspiral] and [tmplt]
-        self.split_multi_sections()
+        # Resolve any URLs needing resolving
+        self.curr_resolved_files = {}
+        self.resolve_urls()
 
         # Check for any substitutions that can be made
-        # FIXME: The python 3 version of ConfigParser can do this automatically
-        # move over to that if it can be backported to python2.X.
-        # We use the same formatting as the new configparser module when doing
-        # ExtendedInterpolation
-        # This is described at
-        # http://docs.python.org/3.4/library/configparser.html
         self.perform_extended_interpolation()
 
         # Check for duplicate options in sub-sections
@@ -149,7 +440,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
         # Dump parsed .ini file if needed
         if parsedFilePath:
             fp = open(parsedFilePath,'w')
-            cp.write(fp)
+            self.write(fp)
             fp.close()
 
 
@@ -173,7 +464,20 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
         # files and URLs to resolve
         if args.config_files:
             confFiles += args.config_files
-        
+
+        # Identify the deletes
+        confDeletes = args.config_delete or []
+        # and parse them
+        parsedDeletes = []
+        for delete in confDeletes:
+            splitDelete = delete.split(":")
+            if len(splitDelete) > 2:
+                raise ValueError(
+                    "Deletes must be of format section:option "
+                    "or section. Cannot parse %s." % str(delete))
+            else:
+                parsedDeletes.append(tuple(splitDelete))
+
         # Identify the overrides
         confOverrides = args.config_overrides or []
         # and parse them
@@ -192,9 +496,9 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             else:
                 raise ValueError(
                     "Overrides must be of format section:option:value "
-                    "or section:option. Cannot parse %s." % override)
+                    "or section:option. Cannot parse %s." % str(override))
 
-        return cls(confFiles, parsedOverrides) 
+        return cls(confFiles, parsedOverrides, None, parsedDeletes)
 
 
     def read_ini_file(self, cpFile):
@@ -224,7 +528,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
         This function will look through the executables section of the
         ConfigParser object and replace any values using macros with full paths.
 
-        For any values that look like 
+        For any values that look like
 
         ${which:lalapps_tmpltbank}
 
@@ -240,7 +544,6 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
                 if newStr != value:
                     self.set('executables', option, newStr)
 
-
     def interpolate_exe(self, testString):
         """
         Replace testString with a path to an executable based on the format.
@@ -248,7 +551,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
         If this looks like
 
         ${which:lalapps_tmpltbank}
- 
+
         it will return the equivalent of which(lalapps_tmpltbank)
 
         Otherwise it will return an unchanged string.
@@ -268,7 +571,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
         if not (testString.startswith('${') and testString.endswith('}')):
             return testString
 
-        # This may not be an exe interpolation, so even if it has ${XXX} form
+        # This may not be an exe interpolation, so even if it has ${ ... } form
         # I may not have to do anything
         newString = testString
 
@@ -282,35 +585,107 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             if testList[0] == 'which':
                 newString = distutils.spawn.find_executable(testList[1])
                 if not newString:
-                    errMsg = "Cannot find exe %s in your path " %(testList[1])
-                    errMsg += "and you specified ${which:%s}." %(testList[1])
-                    raise ValueError(errMsg)
+                    errmsg = "Cannot find exe %s in your path " %(testList[1])
+                    errmsg += "and you specified ${which:%s}." %(testList[1])
+                    raise ValueError(errmsg)
 
         return newString
+
+    def resolve_urls(self):
+        """
+        This function will look through all sections of the
+        ConfigParser object and replace any URLs that are given the resolve
+        magic flag with a path on the local drive.
+
+        Specifically for any values that look like
+
+        ${resolve:https://git.ligo.org/detchar/SOME_GATING_FILE.txt}
+
+        the file will be replaced with the output of resolve_url(URL)
+
+        Otherwise values will be unchanged.
+        """
+        # Only works on executables section
+        for section in self.sections():
+            for option, value in self.items(section):
+                # Check the value
+                new_str = self.resolve_file_url(value)
+                if new_str is not None and new_str != value:
+                    self.set(section, option, new_str)
+
+    def resolve_file_url(self, test_string):
+        """
+        Replace test_string with a path to an executable based on the format.
+
+        If this looks like
+
+        ${which:lalapps_tmpltbank}
+
+        it will return the equivalent of which(lalapps_tmpltbank)
+
+        Otherwise it will return an unchanged string.
+
+        Parameters
+        -----------
+        test_string : string
+            The input string
+
+        Returns
+        --------
+        new_string : string
+            The output string.
+        """
+        # First check if any interpolation is needed and abort if not
+        test_string = test_string.strip()
+        if not (test_string.startswith('${') and test_string.endswith('}')):
+            return test_string
+
+        # This may not be a "resolve" interpolation, so even if it has
+        # ${ ... } form I may not have to do anything
+
+        # Strip the ${ and }
+        test_string = test_string[2:-1]
+
+        test_list = test_string.split(':', 1)
+
+        if len(test_list) == 2:
+            if test_list[0] == 'resolve':
+                curr_lfn = os.path.basename(test_list[1])
+                if curr_lfn in self.curr_resolved_files:
+                    return self.curr_resolved_files[curr_lfn]
+                local_url = resolve_url(test_list[1])
+                self.curr_resolved_files[curr_lfn] = local_url
+                return local_url
+
+        return None
+
 
     def get_subsections(self, section_name):
         """ Return a list of subsections for the given section name
         """
-        subsections = [sec for sec in  self.sections() if sec.startswith(section_name + '-')]   
+        # Keep only subsection names
+        subsections = [sec[len(section_name)+1:] for sec in self.sections()\
+                       if sec.startswith(section_name + '-')]
 
         for sec in subsections:
             sp = sec.split('-')
             # This is unusual, but a format [section-subsection-tag] is okay. Just
             # check that [section-subsection] section exists. If not it is possible
             # the user is trying to use an subsection name with '-' in it
-            if (len(sp) > 1) and not self.has_section('%s-%s' % (sp[0], sp[1])):
-                 raise ValueError( "Workflow uses the '-' as a delimiter so this is"
-                     "interpreted as section-subsection-tag. "
-                     "While checking section %s, no section with "
-                     "name %s-%s was found. " 
-                     "If you did not intend to use tags in an "
-                     "'advanced user' manner, or do not understand what "
-                     "this means, don't use dashes in section "
-                     "names. So [injection-nsbhinj] is good. "
-                     "[injection-nsbh-inj] is not." % (sec, sp[0], sp[1]))
-        
+            if (len(sp) > 1) and not self.has_section('%s-%s' % (section_name,
+                                                                 sp[0])):
+                raise ValueError( "Workflow uses the '-' as a delimiter so "
+                    "this is interpreted as section-subsection-tag. "
+                    "While checking section %s, no section with "
+                    "name %s-%s was found. "
+                    "If you did not intend to use tags in an "
+                    "'advanced user' manner, or do not understand what "
+                    "this means, don't use dashes in section "
+                    "names. So [injection-nsbhinj] is good. "
+                    "[injection-nsbh-inj] is not." % (sec, sp[0], sp[1]))
+
         if len(subsections) > 0:
-            return [sec.split('-')[1] for sec in subsections]
+            return [sec.split('-')[0] for sec in subsections]
         elif self.has_section(section_name):
             return ['']
         else:
@@ -318,7 +693,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
 
     def perform_extended_interpolation(self):
         """
-        Filter through an ini file and replace all examples of 
+        Filter through an ini file and replace all examples of
         ExtendedInterpolation formatting with the exact value. For values like
         ${example} this is replaced with the value that corresponds to the
         option called example ***in the same section***
@@ -348,7 +723,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
     def interpolate_string(self, testString, section):
         """
         Take a string and replace all example of ExtendedInterpolation
-        formatting within the string with the exact value. 
+        formatting within the string with the exact value.
 
         For values like ${example} this is replaced with the value that
         corresponds to the option called example ***in the same section***
@@ -386,14 +761,14 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
                     testString = testString.replace('${'+repString+'}',\
                                             self.get(section,splitString[0]))
                 except ConfigParser.NoOptionError:
-                    print "Substitution failed"
+                    print("Substitution failed")
                     raise
             if len(splitString) == 2:
                 try:
                     testString = testString.replace('${'+repString+'}',\
                                        self.get(splitString[0],splitString[1]))
                 except ConfigParser.NoOptionError:
-                    print "Substitution failed"
+                    print("Substitution failed")
                     raise
             reObj = re.search(r"\$\{.*?\}", testString)
 
@@ -422,6 +797,39 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
                 self.add_options_to_section(newSec, self.items(section))
             self.remove_section(section)
 
+    def populate_shared_sections(self):
+        """Parse the [sharedoptions] section of the ini file.
+
+        That section should contain entries according to:
+
+          * massparams = inspiral, tmpltbank
+          * dataparams = tmpltbank
+
+        This will result in all options in [sharedoptions-massparams] being
+        copied into the [inspiral] and [tmpltbank] sections and the options
+        in [sharedoptions-dataparams] being copited into [tmpltbank].
+        In the case of duplicates an error will be raised.
+        """
+        if not self.has_section('sharedoptions'):
+            # No sharedoptions, exit
+            return
+        for key, value in self.items('sharedoptions'):
+            assert(self.has_section('sharedoptions-%s' %(key)))
+            # Comma separated
+            values = value.split(',')
+            common_options = self.items('sharedoptions-%s' %(key))
+            for section in values:
+                if not self.has_section(section):
+                    self.add_section(section)
+                for arg, val in common_options:
+                    if arg in self.options(section):
+                        raise ValueError('Option exists in both original ' + \
+                               'ConfigParser section [%s] and ' %(section,) + \
+                               'sharedoptions section: %s %s' \
+                               %(arg,'sharedoptions-%s' %(key)))
+                    self.set(section, arg, val)
+            self.remove_section('sharedoptions-%s' %(key))
+        self.remove_section('sharedoptions')
 
     def add_options_to_section(self ,section, items, overwrite_options=False):
         """
@@ -442,7 +850,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             provided items.
             This will override so that the options+values given in items
             will replace the original values if the value is set to True.
-            Default = True 
+            Default = True
         """
         # Sanity checking
         if not self.has_section(section):
@@ -462,12 +870,17 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
     def sanity_check_subsections(self):
         """
         This function goes through the ConfigParset and checks that any options
-        given in the [SECTION_NAME] section are not also given in any 
+        given in the [SECTION_NAME] section are not also given in any
         [SECTION_NAME-SUBSECTION] sections.
 
         """
         # Loop over the sections in the ini file
         for section in self.sections():
+            # [pegasus_profile] specially is allowed to be overriden by
+            # sub-sections
+            if section == 'pegasus_profile':
+                continue
+
             # Loop over the sections again
             for section2 in self.sections():
                 # Check if any are subsections of section
@@ -481,7 +894,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
         """
         Check for duplicate options in two sections, section1 and section2.
         Will return a list of the duplicate options.
-    
+
         Parameters
         ----------
         section1 : string
@@ -520,7 +933,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
 
     def get_opt_tag(self, section, option, tag):
         """
-        Convenience function accessing get_opt_tags() for a single tag: see 
+        Convenience function accessing get_opt_tags() for a single tag: see
         documentation for that function.
         NB calling get_opt_tags() directly is preferred for simplicity.
 
@@ -535,7 +948,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             The ConfigParser option to look for
         tag : string
             The name of the subsection to look in, if not found in [section]
- 
+
         Returns
         --------
         string
@@ -562,7 +975,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             The ConfigParser option to look for
         tags : list of strings
             The name of subsections to look in, if not found in [section]
- 
+
         Returns
         --------
         string
@@ -575,24 +988,35 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
         try:
             return self.get(section, option)
         except ConfigParser.Error:
-            errString = "No option '%s' in section [%s] " %(option,section)
+            err_string = "No option '%s' in section [%s] " %(option,section)
             if not tags:
-                raise ConfigParser.Error(errString + ".")
-            returnVals = []
-            sectionList = ["%s-%s" %(section, tag) for tag in tags]
-            for tag in tags:
-                if self.has_section('%s-%s' %(section, tag)):
-                    if self.has_option('%s-%s' %(section, tag), option):
-                        returnVals.append(self.get('%s-%s' %(section, tag),
+                raise ConfigParser.Error(err_string + ".")
+            return_vals = []
+            sub_section_list = []
+            for sec_len in range(1, len(tags)+1):
+                for tag_permutation in itertools.permutations(tags, sec_len):
+                    joined_name = '-'.join(tag_permutation)
+                    sub_section_list.append(joined_name)
+            section_list = ["%s-%s" %(section, sb) for sb in sub_section_list]
+            err_section_list = []
+            for sub in sub_section_list:
+                if self.has_section('%s-%s' %(section, sub)):
+                    if self.has_option('%s-%s' %(section, sub), option):
+                        err_section_list.append("%s-%s" %(section, sub))
+                        return_vals.append(self.get('%s-%s' %(section, sub),
                                                     option))
-            if not returnVals:
-                errString += "or in sections [%s]." %("] [".join(sectionList))
-                raise ConfigParser.Error(errString)
-            if len(returnVals) > 1:
-                errString += "and multiple entries found in sections [%s]."\
-                              %("] [".join(sectionList))
-                raise ConfigParser.Error(errString)
-            return returnVals[0]
+
+            # We also want to recursively go into sections
+
+            if not return_vals:
+                err_string += "or in sections [%s]." \
+                               %("] [".join(section_list))
+                raise ConfigParser.Error(err_string)
+            if len(return_vals) > 1:
+                err_string += "and multiple entries found in sections [%s]."\
+                              %("] [".join(err_section_list))
+                raise ConfigParser.Error(err_string)
+            return return_vals[0]
 
 
     def has_option_tag(self, section, option, tag):
@@ -612,7 +1036,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             The ConfigParser option to look for
         tag : string
             The name of the subsection to look in, if not found in [section]
- 
+
         Returns
         --------
         Boolean
@@ -639,7 +1063,7 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             The ConfigParser option to look for
         tags : list of strings
             The names of the subsection to look in, if not found in [section]
- 
+
         Returns
         --------
         Boolean
@@ -650,3 +1074,55 @@ class WorkflowConfigParser(glue.pipeline.DeepCopyableConfigParser):
             return True
         except ConfigParser.Error:
             return False
+
+    def section_to_cli(self, section):
+        """Converts a section into a command-line string.
+
+        For example:
+
+        .. code::
+
+            [section_name]
+            foo =
+            bar = 10
+
+        yields: `'--foo --bar 10'`.
+        """
+        opts = []
+        for opt in self.options(section):
+            opts.append('--{}'.format(opt))
+            val = self.get(section, opt)
+            if val != '':
+                opts.append(val)
+        return ' '.join(opts)
+
+    @staticmethod
+    def add_config_opts_to_parser(parser):
+        """Adds options for configuration files to the given parser."""
+        parser.add_argument("--config-files", type=str, nargs="+",
+                            required=True,
+                            help="A file parsable by "
+                                 "pycbc.workflow.WorkflowConfigParser.")
+        parser.add_argument("--config-overrides", type=str, nargs="+",
+                            default=None, metavar="SECTION:OPTION:VALUE",
+                            help="List of section:option:value combinations "
+                                 "to add into the configuration file.")
+
+
+    @classmethod
+    def from_cli(cls, opts):
+        """Loads a config file from the given options, with overrides and
+        deletes applied.
+        """
+        # read configuration file
+        logging.info("Reading configuration file")
+        if opts.config_overrides is not None:
+            overrides = [override.split(":")
+                         for override in opts.config_overrides]
+        else:
+            overrides = None
+        if opts.config_delete is not None:
+            deletes = [delete.split(":") for delete in opts.config_delete]
+        else:
+            deletes = None
+        return cls(opts.config_files, overrides, deleteTuples=deletes)

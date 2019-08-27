@@ -47,7 +47,7 @@ def plot_segs(start, end, color=None, y=0, h=1):
         plot_segs.colors = cycle(['red', 'blue', 'green', 'yellow', 'cyan', 'violet'])
 
     if color is None:
-        color = plot_segs.colors.next()
+        color = next(plot_segs.colors)
 
     for s, e in zip(start, end):
         ax = pylab.gca()
@@ -105,7 +105,7 @@ for i, seg_file in enumerate(sorted(args.segment_files)[::-1]):
              <tr><th>Duration</th><td>%s</td></tr>
       </table>
     """
-    smin = start.min() if len(start) and start.min() < smin else smin
+    smin = start.min() if len(start) and ( start.min() < smin or smin == -1) else smin
     smax = end.max() if len(end) and end.max() > smax else smax
 
     names += [(name, total, y + h + .1)]

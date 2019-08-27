@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 # Copyright (C) 2015 Christopher M. Biwer
 #
@@ -22,7 +22,8 @@ import pycbc.results
 import random
 import shutil
 import zipfile
-from glue import segments
+import codecs
+from ligo import segments
 from jinja2 import Environment, FileSystemLoader
 from pycbc.results.render import get_embedded_config, render_workflow_html_template, setup_template_render
 from pycbc.workflow import segment
@@ -231,7 +232,8 @@ for cwd in dirs:
         shutil.copymode(opts.plots_dir+cwd.path, opts.output_path+'/'+cwd.path)
 
     # save html page
-    with open(opts.output_path+cwd.path+'/index.html', "wb") as fp:
+    with codecs.open(opts.output_path+cwd.path+'/index.html', "w",
+                     encoding='utf-8') as fp:
         fp.write(output)
 
 # copy all files to html directory
@@ -257,7 +259,7 @@ context = {'analysis_title'    : analysis_title,
 output = template.render(context)
 if not os.path.exists(opts.output_path+cwd.path):
     os.makedirs(opts.output_path+cwd.path)
-with open(opts.output_path+cwd.path+'/index.html', "wb") as fp:
+with open(opts.output_path+cwd.path+'/index.html', "w") as fp:
     fp.write(output)
 
 # copy css, js, and font files to html directory
