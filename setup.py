@@ -21,7 +21,8 @@ setup.py file for PyCBC package
 
 from __future__ import print_function
 
-import os, sys, subprocess, shutil
+import sys
+import os, subprocess, shutil
 
 from distutils.errors import DistutilsError
 from distutils.command.clean import clean as _clean
@@ -31,19 +32,20 @@ from setuptools import Extension, setup, Command
 from setuptools.command.build_ext import build_ext as _build_ext
 from setuptools import find_packages
 
-PY3 = sys.version_info[0] == 3
-
 requires = []
-setup_requires = ['numpy>=1.13.0,<1.15.3',]
+setup_requires = ['numpy>=1.13.0,<1.15.3; python_version <= "2.7"',
+                  'numpy>=1.13.0; python_version > "3.0"']
 install_requires =  setup_requires + ['Mako>=1.0.1',
                       'cython',
                       'decorator>=3.4.2',
-                      'scipy>=0.16.0',
+                      'scipy>=0.16.0; python_version >= "3.5"',
+                      'scipy>=0.16.0,<1.3.0; python_version <= "3.4"',
                       'matplotlib>=1.5.1',
                       'pillow',
                       'h5py>=2.5',
                       'jinja2',
-                      'astropy>=2.0.3,<3.0.0',
+                      'astropy>=2.0.3,<3.0.0; python_version <= "2.7"',
+                      'astropy>=2.0.3; python_version > "3.0"',
                       'mpld3>=0.3',
                       'lscsoft-glue>=1.59.3',
                       'emcee==2.2.1',
@@ -51,10 +53,9 @@ install_requires =  setup_requires + ['Mako>=1.0.1',
                       'beautifulsoup4>=4.6.0',
                       'six>=1.10.0',
                       'ligo-segments',
+                      'tqdm',
+                      'weave>=0.16.0; python_version <= "2.7"',
                       ]
-
-if not PY3:
-    install_requires += ['weave>=0.16.0']
 
 def find_files(dirname, relpath=None):
     def find_paths(dirname):
@@ -121,7 +122,7 @@ def get_version_info():
         vinfo = _version_helper.generate_git_version_info()
     except:
         vinfo = vdummy()
-        vinfo.version = '1.13.dev6'
+        vinfo.version = '1.14.dev2'
         vinfo.release = 'False'
 
     with open('pycbc/version.py', 'w') as f:
@@ -204,22 +205,47 @@ VERSION = get_version_info()
 cythonext = ['waveform.spa_tmplt',
              'waveform.utils',
              'types.array',
-             'filter.matchedfilter']
+             'filter.matchedfilter',
+             'vetoes.chisq']
 ext = []
+cython_compile_args = ['-O3', '-w', '-msse4.2', '-ffast-math',
+                       '-ffinite-math-only']
+cython_link_args = []
+# Mac's clang compiler doesn't have openMP support by default. Therefore
+# disable openmp builds on MacOSX. Optimization should never really be a
+# concern on that OS, and this line can be commented out if needed anyway.
+if not sys.platform == 'darwin':
+    cython_compile_args += ['-fopenmp']
+    cython_link_args += ['-fopenmp']
 for name in cythonext:
     e = Extension("pycbc.%s_cpu" % name,
                   ["pycbc/%s_cpu.pyx" % name.replace('.', '/')],
-                  extra_compile_args=[ '-O3', '-w', '-msse4.2',
-                                 '-ffast-math', '-ffinite-math-only'],
+                  extra_compile_args=cython_compile_args,
+                  extra_link_args=cython_link_args,
                   compiler_directives={'embedsignature': True})
     ext.append(e)
+
+# Not all modules work like this:
+e = Extension("pycbc.fft.fftw_pruned_cython",
+              ["pycbc/fft/fftw_pruned_cython.pyx"],
+              extra_compile_args=cython_compile_args,
+              extra_link_args=cython_link_args,
+              compiler_directives={'embedsignature': True})
+ext.append(e)
+e = Extension("pycbc.events.eventmgr_cython",
+              ["pycbc/events/eventmgr_cython.pyx"],
+              extra_compile_args=cython_compile_args,
+              extra_link_args=cython_link_args,
+              compiler_directives={'embedsignature': True})
+ext.append(e)
+
 
 setup (
     name = 'PyCBC',
     version = VERSION,
     description = 'Core library to analyze gravitational-wave data, find signals, and study their parameters.',
     long_description = open('descr.rst').read(),
-    author = 'Ligo-Virgo Collaborations and the PyCBC team',
+    author = 'The PyCBC team',
     author_email = 'alex.nitz@gmail.org',
     url = 'http://www.pycbc.org/',
     download_url = 'https://github.com/gwastro/pycbc/tarball/v%s' % VERSION,
@@ -228,7 +254,7 @@ setup (
     setup_requires = setup_requires,
     extras_require = extras_require,
     install_requires = install_requires,
-    scripts  = find_files('bin', relpath='./') + ['tools/einsteinathome/pycbc_build_eah.sh'],
+    scripts  = find_files('bin', relpath='./'),
     packages = find_packages(),
     package_data = {'pycbc.workflow': find_files('pycbc/workflow'),
                     'pycbc.results': find_files('pycbc/results'),
@@ -236,8 +262,8 @@ setup (
     ext_modules = ext,
     classifiers=[
         'Programming Language :: Python',
-        'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.6',
         'Intended Audience :: Science/Research',
         'Natural Language :: English',
         'Topic :: Scientific/Engineering',

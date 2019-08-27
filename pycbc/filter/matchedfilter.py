@@ -33,6 +33,7 @@ from pycbc.types import complex_same_precision_as, real_same_precision_as
 from pycbc.fft import fft, ifft, IFFT
 import pycbc.scheme
 from pycbc import events
+from pycbc.events import ranking
 import pycbc
 import numpy
 
@@ -99,6 +100,7 @@ class Correlator(object):
     def __new__(cls, *args, **kwargs):
         real_cls = _correlate_factory(*args, **kwargs)
         return real_cls(*args, **kwargs) # pylint:disable=not-callable
+
 
 # The class below should serve as the parent for all schemed classes.
 # The intention is that this class serves simply as the location for
@@ -327,7 +329,7 @@ class MatchedFilterControl(object):
         corr = FrequencySeries(self.corr_mem, delta_f=self.delta_f, copy=False)
         return snr, norm, corr, idx, snrv
 
-    def full_matched_filter_thresh_only(self, segnum, template_norm, window, epoch=None):
+    def full_matched_filter_thresh_only(self, segnum, template_norm, window=None, epoch=None):
         """ Returns the complex snr timeseries, normalization of the complex snr,
         the correlation vector frequency series, the list of indices of the
         triggers, and the snr values at the trigger locations. Returns empty
@@ -359,15 +361,11 @@ class MatchedFilterControl(object):
         snrv : Array
             The snr values at the trigger locations.
         """
-        norm = (4.0 * self.stilde_delta_f) / sqrt(template_norm)
+        norm = (4.0 * self.delta_f) / sqrt(template_norm)
         self.correlators[segnum].correlate()
         self.ifft.execute()
-        snrv, idx = events.threshold_only(self.snr_mem[self.segments[segnum].analyze],
+        idx, snrv = events.threshold_only(self.snr_mem[self.segments[segnum].analyze],
                                           self.snr_threshold / norm)
-
-        if len(idx) == 0:
-            return [], [], [], [], []
-
         logging.info("%s points above threshold" % str(len(idx)))
 
         snr = TimeSeries(self.snr_mem, epoch=epoch, delta_t=self.delta_t, copy=False)
@@ -512,7 +510,7 @@ def compute_max_snr_over_sky_loc_stat(hplus, hcross, hphccorr,
         The SNR maximized over sky location
     """
     # NOTE: Not much optimization has been done here! This may need to be
-    # C-ified using scipy.weave.
+    # Cythonized.
 
     if out is None:
         out = zeros(len(hplus))
@@ -823,6 +821,7 @@ def compute_u_val_for_sky_loc_stat_no_phase(hplus, hcross, hphccorr,
 
     return u_val, coa_phase
 
+
 class MatchedFilterSkyMaxControl(object):
     # FIXME: This seems much more simplistic than the aligned-spin class.
     #        E.g. no correlators. Is this worth updating?
@@ -971,6 +970,7 @@ class MatchedFilterSkyMaxControl(object):
     def _maximized_extrinsic_params(self, hplus, hcross, hphccorr, **kwargs):
         return compute_u_val_for_sky_loc_stat(hplus, hcross, hphccorr,
                                               **kwargs)
+
 
 class MatchedFilterSkyMaxControlNoPhase(MatchedFilterSkyMaxControl):
     # Basically the same as normal SkyMaxControl, except we use a slight
@@ -1247,10 +1247,9 @@ def matched_filter_core(template, data, psd=None, low_frequency_cutoff=None,
         h_norm = sigmasq(htilde, psd, low_frequency_cutoff, high_frequency_cutoff)
 
     norm = (4.0 * stilde.delta_f) / sqrt( h_norm)
-    delta_t = 1.0 / (N * stilde.delta_f)
 
-    return (TimeSeries(_q, epoch=stilde._epoch, delta_t=delta_t, copy=False),
-           FrequencySeries(qtilde, epoch=stilde._epoch, delta_f=htilde.delta_f, copy=False),
+    return (TimeSeries(_q, epoch=stilde._epoch, delta_t=stilde.delta_t, copy=False),
+           FrequencySeries(qtilde, epoch=stilde._epoch, delta_f=stilde.delta_f, copy=False),
            norm)
 
 def smear(idx, factor):
@@ -1461,6 +1460,7 @@ def quadratic_interpolate_peak(left, middle, right):
     peak_value = middle + 0.25 * (left - right) * bin_offset
     return bin_offset, peak_value
 
+
 class LiveBatchMatchedFilter(object):
 
     """Calculate SNR and signal consistency tests in a batched progression"""
@@ -1544,7 +1544,7 @@ class LiveBatchMatchedFilter(object):
             self.cout_mem[i] = zeros(size, dtype=numpy.complex64)
             self.ifts[i] = IFFT(self.cout_mem[i], self.out_mem[i],
                                 nbatch=count,
-                                size=len(self.cout_mem[i]) / count)
+                                size=len(self.cout_mem[i]) // count)
 
         # Split the templates into their processing groups
         for dur, count in mem_ids:
@@ -1566,7 +1566,6 @@ class LiveBatchMatchedFilter(object):
                 s += psize
                 e += psize
             self.corr.append(BatchCorrelator(tgroup, [t.cout for t in tgroup], len(tgroup[0])))
-
 
     def set_data(self, data):
         """Set the data reader object to use"""
@@ -1633,7 +1632,7 @@ class LiveBatchMatchedFilter(object):
                 sg_chisq[i] = sgv[0]
 
             if self.newsnr_threshold:
-                newsnr = events.newsnr(results['snr'][i], chisq[i])
+                newsnr = ranking.newsnr(results['snr'][i], chisq[i])
                 if newsnr >= self.newsnr_threshold:
                     keep.append(i)
 
@@ -1733,14 +1732,13 @@ class LiveBatchMatchedFilter(object):
 def followup_event_significance(ifo, data_reader, bank,
                                 template_id, coinc_times,
                                 coinc_threshold=0.005,
-                                lookback=200, duration=0.095):
+                                lookback=150, duration=0.095):
     """ Followup an event in another detector and determine its significance
     """
-    # Lookback for background must be shorter than the strain buffer
-    if lookback > data_reader.strain.duration:
-        lookback = data_reader.strain.duration / 2
-        logging.warn('Setting lookback for background to '
-                     '%s to ensure data exists' % lookback)
+    from pycbc.waveform import get_waveform_filter_length_in_time
+    tmplt = bank.table[template_id]
+    length_in_time = get_waveform_filter_length_in_time(tmplt['approximant'],
+                                                        tmplt)
 
     # calculate onsource time range
     from pycbc.detector import Detector
@@ -1761,12 +1759,18 @@ def followup_event_significance(ifo, data_reader, bank,
     onsource_start -= coinc_threshold
     onsource_end += coinc_threshold
 
+    # Calculate how much time needed to calculate significance
+    trim_pad = (data_reader.trim_padding * data_reader.strain.delta_t)
+    bdur = int(lookback + 2.0 * trim_pad + length_in_time)
+    if bdur > data_reader.strain.duration * .75:
+        bdur = data_reader.strain.duration * .75
+
     # Require all strain be valid within lookback time
     if data_reader.state is not None:
         state_start_time = data_reader.strain.end_time \
-                - data_reader.reduced_pad - lookback
-        if not data_reader.state.is_extent_valid(state_start_time, lookback):
-            return None, None, None
+                - data_reader.reduced_pad * data_reader.strain.delta_t - bdur
+        if not data_reader.state.is_extent_valid(state_start_time, bdur):
+            return None, None, None, None
 
     # We won't require that all DQ checks be valid for now, except at
     # onsource time.
@@ -1774,16 +1778,14 @@ def followup_event_significance(ifo, data_reader, bank,
         dq_start_time = onsource_start - duration / 2.0
         dq_duration = onsource_end - onsource_start + duration
         if not data_reader.dq.is_extent_valid(dq_start_time, dq_duration):
-            return None, None, None
+            return None, None, None, None
 
     # Calculate SNR time series for this duration
-    trim_pad = (data_reader.trim_padding * data_reader.strain.delta_t)
-    bdur = lookback + 2.0 * trim_pad
     htilde = bank.get_template(template_id, min_buffer=bdur)
     stilde = data_reader.overwhitened_data(htilde.delta_f)
 
-    snr, _, norm = matched_filter_core(htilde, stilde,
-                                          h_norm=htilde.sigmasq(stilde.psd))
+    sigma2 = htilde.sigmasq(stilde.psd)
+    snr, _, norm = matched_filter_core(htilde, stilde, h_norm=sigma2)
 
     # Find peak in on-source and determine p-value
     onsrc = snr.time_slice(onsource_start, onsource_end)
@@ -1791,8 +1793,7 @@ def followup_event_significance(ifo, data_reader, bank,
     peak_time = peak * snr.delta_t + onsrc.start_time
     peak_value = abs(onsrc[peak])
 
-    bstart = float(snr.start_time) + htilde.length_in_time + trim_pad
-
+    bstart = float(snr.start_time) + length_in_time + trim_pad
     bkg = abs(snr.time_slice(bstart, onsource_start)).numpy()
 
     window = int((onsource_end - onsource_start) * snr.sample_rate)
@@ -1808,7 +1809,7 @@ def followup_event_significance(ifo, data_reader, bank,
     logging.info('Adding %s to candidate, pvalue %s, %s samples', ifo,
                  pvalue, nsamples)
 
-    return baysnr * norm, peak_time, pvalue
+    return baysnr * norm, peak_time, pvalue, sigma2
 
 def compute_followup_snr_series(data_reader, htilde, trig_time,
                                 duration=0.095, check_state=True,
